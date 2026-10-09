@@ -229,3 +229,18 @@ export function depthToPoints(map: DepthMap, k: Intrinsics, step = 4): Vec3[] {
   }
   return pts;
 }
+
+/** Disparidad en un punto normalizado de pantalla (vecino más cercano). */
+export function disparityAt(map: DepthMap, u: number, v: number): number {
+  const x = Math.min(map.width - 1, Math.max(0, Math.round(u * (map.width - 1))));
+  const y = Math.min(map.height - 1, Math.max(0, Math.round(v * (map.height - 1))));
+  return map.data[y * map.width + x];
+}
+
+/**
+ * Profundidad en metros de un píxel, dada la escala `a` (disparidad × distancia) obtenida
+ * de algo de distancia conocida (el cuerpo del jugador). Infinito si la disparidad es ~0.
+ */
+export function metricDepth(disparity: number, scale: number): number {
+  return disparity > 1e-3 ? scale / disparity : Infinity;
+}

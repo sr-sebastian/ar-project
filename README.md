@@ -12,9 +12,9 @@ Corre en el navegador del PC (Chrome o Edge) con TypeScript, MediaPipe, Three.js
 | **Mesa** | Mesa | Apuntando a la mesa en diagonal o desde arriba | Aplastá al Topo, Bloques, Visor |
 
 - **Fruit Slicer** (cuerpo completo): las frutas se cortan con las manos o con una **katana** clavada al costado. Para agarrarla, cerrá el puño sobre el mango; para soltarla, abrí la palma. Las bombas se esquivan con el cuerpo. Abrir la boca activa la cámara lenta, y sonreír al final guarda el puntaje.
-- **Aplastá al Topo** (mesa): un tablero de ~45 cm se apoya sobre tu mesa real. Los topos salen de adentro de los agujeros y se aplastan bajando la mano sobre ellos. Levantar las cejas los congela.
-- **Bloques** (ambos modos): bloques con física para agarrar con una mano (puño o pellizco), abrazar con los dos brazos, apilar y lanzar. En el modo Torre se mide la altura y se guarda el récord. En el piso los bloques miden 25–45 cm; en la mesa, 4–7 cm.
-- **Visor de tracking**: muestra el esqueleto, las manos (indicando si se vieron de lejos), la cara, las expresiones, las distancias en metros, la superficie con sus ejes, el mapa de profundidad y los oclusores.
+- **Aplastá al Topo** (mesa): un tablero de ~45 cm se apoya sobre tu mesa real. Los topos salen de adentro de los agujeros. En tu mano aparece un **martillo**: un martillazo rápido que termine sobre el topo lo aplasta. El golpe se decide en pantalla, que es lo preciso, así que no depende de la profundidad. Levantar las cejas los congela.
+- **Bloques** (ambos modos): el bloque bajo tu mano se resalta. Se agarra cerrando la mano (puño o pellizco) o con una mano a cada costado (abrazo con los dos brazos), y se suelta abriéndola, lo que permite apilar y lanzar. Mientras lo sostenés, se mueve sobre el rayo exacto de tu mano, y la altura se toma suavizada. En el modo Torre se mide la altura y se guarda el récord. En el piso los bloques miden 25–45 cm; en la mesa, 4–7 cm.
+- **Visor de tracking**: muestra el esqueleto y las **siluetas** de las personas (hasta 3: la más cercana es el jugador), las manos (indicando si se vieron de lejos), la cara, las expresiones, las distancias en metros, la superficie con sus ejes, el mapa de profundidad **en metros** y el tiempo de cada etapa del cuadro. También permite **calibrar la distancia**.
 
 ## Control con la mano (sin mouse)
 
@@ -37,7 +37,13 @@ Hay varios métodos. Se usa el mejor disponible, y el chip de arriba a la derech
 3. **Por tu mano (mesa):** apoyá la mano abierta y plana sobre la mesa durante 1 s. El centro de la palma da el punto y la orientación de la mano da la inclinación.
 4. **Profundidad por IA** (opcional, en Ajustes): Depth Anything V2 estima la inclinación de la mesa y la zona útil.
 
-Para volver a detectar la superficie (por ejemplo, si moviste la cámara), usá el botón de la mira.
+Si el marcador queda **tapado o lo pisás**, la superficie queda fija en la última posición buena. Una lectura aislada muy distinta, como una esquina tapada, se ignora; sólo se acepta si se repite varias veces, que es lo que pasa si de verdad moviste el marcador o la cámara. Para volver a detectar la superficie, usá el botón de la mira.
+
+### Calibración de la cámara (importante)
+
+Las distancias y la inclinación de las superficies dependen del **campo de visión** de tu cámara. Por defecto se supone de 65°, y las webcams suelen tener entre 60° y 90°. Hay dos formas de calibrarlo:
+- **Automática con el marcador:** mostrale el marcador a la cámara **inclinado**, no de frente. Un cuadrado en perspectiva permite calcular la focal real, y se calibra solo (aparece un aviso).
+- **Con tu cuerpo:** parate a una distancia que hayas medido y, en *Ajustes* o en el visor, ingresala y tocá *Calibrar distancia*.
 
 ## Detección a distancia
 
@@ -45,6 +51,8 @@ Para volver a detectar la superficie (por ejemplo, si moviste la cámara), usá 
 - Si la pose ve una muñeca o la cabeza pero el detector no encuentra la mano o la cara, se **recorta y amplía esa zona** y se vuelve a buscar ahí.
 - Si aun así no aparece, se usa una mano aproximada con los puntos de la pose. Alcanza para cortar, empujar y abrazar, no para gestos finos.
 - De lejos, la posición de la mano se ancla a la muñeca del esqueleto para que todo quede coherente.
+- Las interacciones (agarrar, golpear, empuñar la katana) se deciden **en pantalla**, donde la posición de la mano es precisa. La profundidad, que se estima por el tamaño de la mano y es ruidosa, se usa muy suavizada y sólo como filtro.
+- **Siluetas:** segmentación de personas (MediaPipe *selfie multiclass*) para dibujarlas y para que el cuerpo entero tape a los objetos virtuales.
 - En *Ajustes → Modelo de cuerpo*, *Heavy* es el modelo que mejor funciona de lejos.
 
 ## Integración visual

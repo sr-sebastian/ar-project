@@ -147,6 +147,8 @@ small, .small { color: var(--muted); font-size: 0.86em; }
 .panel label.row { flex-direction: row; align-items: center; gap: 8px; }
 .panel select, .panel input[type='range'], .panel input[type='number'] { width: 100%; }
 .panel select, .panel input[type='number'] { background: #0b0e16; border: 1px solid var(--line-strong); border-radius: 10px; padding: 9px; color: var(--text); font: inherit; }
+.row-inline { display: flex; align-items: center; gap: 8px; }
+.row-inline input { width: 80px !important; }
 .qr img { display: block; margin: 8px auto; border-radius: 10px; background: #fff; }
 .qr code { word-break: break-all; font-size: 11px; }
 
@@ -189,6 +191,13 @@ small, .small { color: var(--muted); font-size: 0.86em; }
 }
 .debug-actions { display: flex; gap: 8px; margin-bottom: 8px; }
 .debug-actions button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px; }
+.debug-actions { flex-wrap: wrap; }
+.debug-actions button.active { border-color: var(--good); color: var(--good); }
+.debug-calib { display: flex; align-items: center; gap: 6px; margin: 6px 0 2px; }
+.debug-calib span { display: inline-flex; align-items: center; gap: 6px; flex: 1; color: var(--muted); }
+.debug-calib input { width: 64px; background: #0b0e16; border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px; color: var(--text); font: inherit; }
+.debug-calib button { background: var(--accent); border: 0; border-radius: 8px; padding: 6px 10px; font-weight: 600; }
+.debug-calib-msg { display: block; margin-bottom: 4px; }
 .debug-panel h4 { margin: 12px 0 4px; color: var(--good); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
 .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; align-items: center; }
 .kv span { color: var(--muted); }

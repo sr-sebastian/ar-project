@@ -93,6 +93,7 @@ export class Tracker {
   private lastVideoTime = -1;
   private lastTimestamp = 0;
   private frameIndex = 0;
+  private primaryCenter: { x: number; y: number } | null = null;
   /** Frames seguidos en que el crop de cada mano no encontró nada (para espaciar reintentos). */
   private cropMisses: Record<Handedness | 'face', number> = { Left: 0, Right: 0, face: 0 };
   private cropCanvas = Object.assign(document.createElement('canvas'), { width: CROP_SIZE, height: CROP_SIZE });
@@ -149,7 +150,7 @@ export class Tracker {
         PoseLandmarker.createFromOptions(fileset, {
           baseOptions: { modelAssetPath, delegate },
           runningMode: 'VIDEO',
-          numPoses: 1,
+          numPoses: 3,
           minPoseDetectionConfidence: 0.35,
           minPosePresenceConfidence: 0.4,
           minTrackingConfidence: 0.4,
@@ -195,6 +196,37 @@ export class Tracker {
       );
     }
     this.onStatus(module, 'ready');
+  }
+
+  /**
+   * Con varias personas, el jugador es la más grande en pantalla (la más cercana), con
+   * preferencia por quien ya era el jugador (para no saltar de persona en persona).
+   */
+  private pickPrimary(poses: NormalizedLandmark[][]): number {
+    if (poses.length === 0) {
+      this.primaryCenter = null;
+      return -1;
+    }
+    let best = 0;
+    let bestScore = -Infinity;
+    poses.forEach((lms, i) => {
+      const vis = lms.filter((l) => (l.visibility ?? 0) > 0.5);
+      if (vis.length < 4) return;
+      const xs = vis.map((l) => l.x);
+      const ys = vis.map((l) => l.y);
+      const area = (Math.max(...xs) - Math.min(...xs)) * (Math.max(...ys) - Math.min(...ys));
+      const cx = (Math.max(...xs) + Math.min(...xs)) / 2;
+      const cy = (Math.max(...ys) + Math.min(...ys)) / 2;
+      const stick = this.primaryCenter ? Math.max(0, 0.15 - Math.hypot(cx - this.primaryCenter.x, cy - this.primaryCenter.y)) : 0;
+      const score = area + stick;
+      if (score > bestScore) {
+        bestScore = score;
+        best = i;
+      }
+    });
+    const l = poses[best];
+    this.primaryCenter = { x: (l[11].x + l[12].x + l[23].x + l[24].x) / 4, y: (l[11].y + l[12].y + l[23].y + l[24].y) / 4 };
+    return best;
   }
 
   /** Recorta una región del video al canvas de crops (los bordes fuera del frame quedan negros). */
@@ -304,13 +336,16 @@ export class Tracker {
     let pose: RawPose | null = null;
     let rawPose: NormalizedLandmark[] | null = null;
     let rawPoseWorld: NormalizedLandmark[] = [];
+    const otherPoses: Landmark[][] = [];
     if (this.pose && this.enabled.has('pose')) {
       const start = performance.now();
       const res = this.pose.detectForVideo(video, ts);
       timings.pose = performance.now() - start;
-      if (res.landmarks[0]) {
-        rawPose = res.landmarks[0];
-        rawPoseWorld = res.worldLandmarks[0] ?? [];
+      const primary = this.pickPrimary(res.landmarks);
+      res.landmarks.forEach((l, i) => i !== primary && otherPoses.push(l.map(toScreen)));
+      if (primary >= 0) {
+        rawPose = res.landmarks[primary];
+        rawPoseWorld = res.worldLandmarks[primary] ?? [];
         const lms = rawPose.map(toScreen);
         pose = {
           landmarks: doSmooth ? this.poseSmoother.smooth(lms, t) : lms,
@@ -408,7 +443,7 @@ export class Tracker {
       timings.face = performance.now() - start;
     }
 
-    return { t, videoWidth: vw, videoHeight: vh, mirrored, hands, face, pose, timings };
+    return { t, videoWidth: vw, videoHeight: vh, mirrored, hands, face, pose, otherPoses, timings };
   }
 
   dispose() {

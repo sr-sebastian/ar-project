@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { bladeSweepHits, FruitSlicerGame } from '../src/apps/fruit-slicer/logic';
-import { WhackAMoleGame } from '../src/apps/whack-a-mole/logic';
+import { swingHit, WhackAMoleGame } from '../src/apps/whack-a-mole/logic';
 
 const bounds = { minX: 0, maxX: 16 / 9, minY: 0, maxY: 1 };
 const noInput = { blades: [], head: null };
@@ -125,5 +125,18 @@ describe('bladeSweepHits (katana)', () => {
       sweeps: [{ prevBase: { x: f.x - 0.3, y: f.y + 0.4 }, prevTip: { x: f.x - 0.3, y: f.y - 0.4 }, base: { x: f.x + 0.3, y: f.y + 0.4 }, tip: { x: f.x + 0.3, y: f.y - 0.4 }, speed: 4 }],
     });
     expect(ev.some((e) => e.type === 'slice')).toBe(true);
+  });
+});
+
+describe('swingHit (martillo)', () => {
+  const region = { x0: 0.4, x1: 0.6, y0: 0.4, y1: 0.6 };
+  it('golpea con un martillazo rápido sobre el topo', () => {
+    expect(swingHit({ x: 0.5, y: 0.5 }, 1.5, region)).toBe(true);
+  });
+  it('no golpea si sólo se apoya el martillo encima', () => {
+    expect(swingHit({ x: 0.5, y: 0.5 }, 0.2, region)).toBe(false);
+  });
+  it('no golpea fuera del topo', () => {
+    expect(swingHit({ x: 0.8, y: 0.5 }, 2, region)).toBe(false);
   });
 });

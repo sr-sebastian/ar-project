@@ -1,15 +1,16 @@
 import type RAPIER_NS from '@dimforge/rapier3d-compat';
 import * as THREE from 'three';
-import { seededRandom, type Vec3 } from '../../core/math';
+import { seededRandom, type Vec2, type Vec3 } from '../../core/math';
 import { storage } from '../../core/settings';
 import { BLOCK_COLORS, createToyBlock, createWoodBlock } from '../../models/props';
-import { HAND } from '../../perception/landmarks';
-import type { HandState, PerceptionFrame } from '../../perception/types';
+import { planeHeight, rayPlane } from '../../perception/space/surface';
+import type { PerceptionFrame, SpaceState } from '../../perception/types';
 import type { Handedness } from '../../tracking/types';
 import { icon } from '../../ui/icons';
+import { HandRig } from '../shared/HandRig';
 import { SurfaceAnchor } from '../shared/SurfaceAnchor';
 import type { AppContext, AppDefinition, AppInstance } from '../types';
-import { findOneHandGrab, findTwoHandGrab, throwVelocity, twoHandReleased, type GrabBlock } from './grab';
+import { screenHover, screenTwoHandGrab, throwVelocity, type ScreenBox } from './grab';
 
 type Rapier = typeof RAPIER_NS;
 
@@ -21,8 +22,8 @@ interface Block {
 }
 
 type Hold =
-  | { kind: 'one'; hand: Handedness; block: number; offset: THREE.Vector3; rot: THREE.Quaternion; handRot: THREE.Quaternion }
-  | { kind: 'two'; block: number; width: number; rot: THREE.Quaternion; yaw0: number };
+  | { kind: 'one'; hand: Handedness; block: number; height: number; handH0: number; angle0: number; rot: THREE.Quaternion; openSince: number }
+  | { kind: 'two'; block: number; height: number; handH0: number; spread0: number; angle0: number; rot: THREE.Quaternion };
 
 const GLYPHS = 'ARPROYECT0123456789';
 const rnd = seededRandom(4);
@@ -45,8 +46,10 @@ class BlocksApp implements AppInstance {
   private nextId = 1;
   private hands = new Map<string, RAPIER_NS.RigidBody>();
   private hold: Hold | null = null;
-  private handVel: Record<Handedness, THREE.Vector3> = { Left: new THREE.Vector3(), Right: new THREE.Vector3() };
-  private prevHand: Record<Handedness, THREE.Vector3 | null> = { Left: null, Right: null };
+  private rig = new HandRig();
+  private hovered: number | null = null;
+  private holdVel = new THREE.Vector3();
+  private lastTarget: THREE.Vector3 | null = null;
   private accumulator = 0;
   private placed = false;
   private placeTimer = 0;
@@ -156,21 +159,26 @@ class BlocksApp implements AppInstance {
     this.blocks.push({ id, body, mesh, half: size.clone().multiplyScalar(0.5) });
   }
 
-  /** Posición local de la mano (palma; o muñeca de la pose si está lejos). */
-  private handPos(h: HandState): THREE.Vector3 | null {
-    const p = h.palm3 ?? null;
-    return p ? this.anchor.camToLocal(p) : null;
-  }
-
-  private closed(h: HandState) {
-    return h.source !== 'pose' && (h.gesture === 'fist' || h.pinching || h.mpGesture?.name === 'Closed_Fist');
-  }
-
-  private grabBlocks(): GrabBlock[] {
+  /** Caja en pantalla de cada bloque (proyección de sus 8 esquinas) y su profundidad. */
+  private screenBoxes(): ScreenBox[] {
     return this.blocks.map((b) => {
-      const t = b.body.translation();
-      return { id: b.id, center: { x: t.x, y: t.y, z: t.z }, radius: b.half.length(), inner: Math.min(b.half.x, b.half.y, b.half.z) };
+      const pts = [];
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+        const local = new THREE.Vector3(sx * b.half.x, sy * b.half.y, sz * b.half.z).applyQuaternion(b.mesh.quaternion).add(b.mesh.position);
+        pts.push(this.anchor.localToNorm(local));
+      }
+      const xs = pts.map((p) => p.x);
+      const ys = pts.map((p) => p.y);
+      const world = this.anchor.localToWorld(b.mesh.position.clone());
+      return { id: b.id, x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys), depth: -world.z };
     });
+  }
+
+  /** Punto local sobre el rayo de un punto de pantalla, a la altura `h` sobre la superficie. */
+  private rayAtHeight(screen: Vec2, h: number, space: SpaceState): THREE.Vector3 | null {
+    const plane = { normal: space.surface.normal, d: space.surface.d - h };
+    const hit = rayPlane(plane, space.intrinsics, screen.x, screen.y);
+    return hit ? this.anchor.camToLocal(hit) : null;
   }
 
   update(frame: PerceptionFrame | null, dt: number) {
@@ -190,7 +198,8 @@ class BlocksApp implements AppInstance {
     if (!this.world || !this.R) return;
     if (this.blocks.length === 0 && this.placed) this.placeInitial();
 
-    this.updateHands(frame, dt);
+    this.rig.update(frame, (p, z) => this.ctx.scene.worldToCam(this.ctx.scene.normToWorld(p, z)), frame.space.center.z);
+    this.updateHands();
     this.updateGrab(frame);
 
     // Paso de física fijo a 60 Hz.
@@ -238,79 +247,69 @@ class BlocksApp implements AppInstance {
     this.hud.best.innerHTML = b ? `${icon('trophy', 20)} Récord: ${(b * 100).toFixed(0)} cm` : '';
   }
 
-  /** Colisionadores cinemáticos que siguen a las manos (empujan bloques). */
-  private updateHands(frame: PerceptionFrame, dt: number) {
+  /** Colisionadores cinemáticos (esferas) en las palmas: permiten empujar y voltear. */
+  private updateHands() {
     const R = this.R!;
     const world = this.world!;
     const seen = new Set<string>();
-    for (const h of frame.hands) {
-      const pos = this.handPos(h);
-      if (!pos) continue;
-      const prev = this.prevHand[h.handedness];
-      if (prev) this.handVel[h.handedness].lerp(pos.clone().sub(prev).divideScalar(Math.max(dt, 1e-3)), 0.4);
-      this.prevHand[h.handedness] = pos.clone();
-      // Puntos de contacto: palma (+ yemas si hay dedos), salvo la mano que sostiene.
+    for (const h of this.rig.hands) {
       if (this.hold && (this.hold.kind === 'two' || this.hold.hand === h.handedness)) continue;
-      const pts: [string, Vec3, number][] = [[`${h.handedness}:palm`, pos, (h.source === 'pose' ? 0.07 : 0.035) * Math.max(0.4, this.scale)]];
-      if (h.camera && h.source !== 'pose') {
-        for (const i of [HAND.THUMB_TIP, HAND.INDEX_TIP, HAND.MIDDLE_TIP, HAND.RING_TIP, HAND.PINKY_TIP]) pts.push([`${h.handedness}:${i}`, this.anchor.camToLocal(h.camera[i]), 0.01]);
+      const p = this.anchor.camToLocal(h.point);
+      const r = (h.hand.source === 'pose' ? 0.07 : 0.035) * Math.max(0.4, this.scale);
+      seen.add(h.handedness);
+      let body = this.hands.get(h.handedness);
+      if (!body) {
+        body = world.createRigidBody(R.RigidBodyDesc.kinematicPositionBased().setTranslation(p.x, p.y, p.z));
+        world.createCollider(R.ColliderDesc.ball(r).setFriction(1), body);
+        this.hands.set(h.handedness, body);
       }
-      for (const [key, p, r] of pts) {
-        seen.add(key);
-        let body = this.hands.get(key);
-        if (!body) {
-          body = world.createRigidBody(R.RigidBodyDesc.kinematicPositionBased().setTranslation(p.x, p.y, p.z));
-          world.createCollider(R.ColliderDesc.ball(r).setFriction(1), body);
-          this.hands.set(key, body);
-        }
-        body.setNextKinematicTranslation({ x: p.x, y: Math.max(p.y, r), z: p.z });
-      }
+      body.setNextKinematicTranslation({ x: p.x, y: Math.max(p.y, r), z: p.z });
     }
     for (const [key, body] of this.hands) {
       if (seen.has(key)) continue;
       world.removeRigidBody(body);
       this.hands.delete(key);
     }
-    for (const side of ['Left', 'Right'] as const) if (!frame.hands.some((h) => h.handedness === side)) this.prevHand[side] = null;
   }
 
+  /**
+   * Agarre decidido EN PANTALLA (donde la detección es precisa). Mientras se sostiene,
+   * el bloque se mueve sobre el rayo exacto de la mano, a una altura que sigue la
+   * altura (muy suavizada) de la mano: preciso al desplazar, estable al levantar.
+   */
   private updateGrab(frame: PerceptionFrame) {
-    const R = this.R!;
-    const hands = frame.hands.map((h) => ({ h, pos: this.handPos(h) })).filter((x): x is { h: HandState; pos: THREE.Vector3 } => !!x.pos);
-    const byId = (id: number) => this.blocks.find((b) => b.id === id)!;
-    const margin = this.scale < 1 ? 0.03 : 0.15;
-    const left = hands.find((x) => x.h.handedness === 'Left');
-    const right = hands.find((x) => x.h.handedness === 'Right');
+    const space = frame.space;
+    const boxes = this.screenBoxes();
+    const table = this.scale < 1;
+    const margin = table ? 0.015 : 0.03;
+    const depthTol = table ? 0.3 : 1.2;
+    const byId = (id: number) => this.blocks.find((b) => b.id === id);
+    const handH = (p: Vec3) => planeHeight(space.surface, p);
+
+    // Resaltado del bloque apuntado (sin agarrar).
+    this.hovered = null;
+    if (!this.hold) {
+      for (const h of this.rig.hands) {
+        const id = screenHover({ ...h.screen, depth: h.depth }, boxes, margin, depthTol);
+        if (id !== null) this.hovered = id;
+      }
+    }
+    for (const b of this.blocks) {
+      const mat = b.mesh.material as THREE.MeshStandardMaterial;
+      const lit = this.hovered === b.id || this.hold?.block === b.id;
+      mat.emissive?.setHex(lit ? (this.hold?.block === b.id ? 0x2244aa : 0x334455) : 0x000000);
+    }
 
     if (!this.hold) {
-      const blocks = this.grabBlocks();
-      // Primero el abrazo/apretón con dos manos.
-      if (left && right) {
-        const id = findTwoHandGrab({ id: 'Left', pos: left.pos, closed: false }, { id: 'Right', pos: right.pos, closed: false }, blocks, margin);
-        if (id !== null) {
-          const b = byId(id);
-          b.body.setBodyType(R.RigidBodyType.KinematicPositionBased, true);
-          const r = b.body.rotation();
-          this.hold = { kind: 'two', block: id, width: left.pos.distanceTo(right.pos), rot: new THREE.Quaternion(r.x, r.y, r.z, r.w), yaw0: Math.atan2(right.pos.z - left.pos.z, right.pos.x - left.pos.x) };
-          return;
-        }
+      const [l, r] = [this.rig.get('Left'), this.rig.get('Right')];
+      if (l && r) {
+        const id = screenTwoHandGrab({ ...l.screen, depth: l.depth }, { ...r.screen, depth: r.depth }, boxes, table ? 0.04 : 0.08, depthTol);
+        if (id !== null) return this.startHold(byId(id)!, { kind: 'two' }, frame);
       }
-      for (const { h, pos } of hands) {
-        const id = findOneHandGrab({ id: h.handedness, pos, closed: this.closed(h) }, blocks, margin);
-        if (id === null) continue;
-        const b = byId(id);
-        b.body.setBodyType(R.RigidBodyType.KinematicPositionBased, true);
-        const t = b.body.translation();
-        const r = b.body.rotation();
-        this.hold = {
-          kind: 'one',
-          hand: h.handedness,
-          block: id,
-          offset: new THREE.Vector3(t.x, t.y, t.z).sub(pos),
-          rot: new THREE.Quaternion(r.x, r.y, r.z, r.w),
-          handRot: this.handQuat(h),
-        };
-        return;
+      for (const h of this.rig.hands) {
+        if (!h.closed) continue;
+        const id = screenHover({ ...h.screen, depth: h.depth }, boxes, margin, depthTol);
+        if (id !== null) return this.startHold(byId(id)!, { kind: 'one', hand: h.handedness }, frame);
       }
       return;
     }
@@ -320,45 +319,68 @@ class BlocksApp implements AppInstance {
       this.hold = null;
       return;
     }
+    let target: THREE.Vector3 | null;
+    let yaw: number;
     if (this.hold.kind === 'one') {
-      const held = hands.find((x) => x.h.handedness === (this.hold as { hand: Handedness }).hand);
-      if (!held || !this.closed(held.h)) return this.release(b, held ? this.handVel[held.h.handedness] : null);
-      // Sigue a la mano conservando el desfase y girando con la mano.
-      const dq = this.handQuat(held.h).multiply(this.hold.handRot.clone().invert());
-      const target = held.pos.clone().add(this.hold.offset.clone().applyQuaternion(dq));
-      target.y = Math.max(target.y, b.half.y * 0.5);
-      b.body.setNextKinematicTranslation(target);
-      b.body.setNextKinematicRotation(dq.clone().multiply(this.hold.rot));
+      const hand = this.rig.get(this.hold.hand);
+      if (!hand) return this.release(b);
+      if (!hand.closed) {
+        this.hold.openSince ||= frame.t;
+        if (frame.t - this.hold.openSince > 0.12) return this.release(b);
+      } else this.hold.openSince = 0;
+      const lift = THREE.MathUtils.clamp(handH(hand.point) - this.hold.handH0, -this.hold.height, table ? 0.3 : 1.5);
+      target = this.rayAtHeight(hand.screen, Math.max(b.half.y, this.hold.height + lift), space);
+      yaw = -(hand.angle - this.hold.angle0);
     } else {
-      if (!left || !right || twoHandReleased(left.pos, right.pos, this.hold.width)) {
-        const v = left && right ? this.handVel.Left.clone().add(this.handVel.Right).multiplyScalar(0.5) : null;
-        return this.release(b, v);
-      }
-      const mid = left.pos.clone().add(right.pos).multiplyScalar(0.5);
-      mid.y = Math.max(mid.y, b.half.y * 0.5);
-      const yaw = Math.atan2(right.pos.z - left.pos.z, right.pos.x - left.pos.x);
-      const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -(yaw - this.hold.yaw0)).multiply(this.hold.rot);
-      b.body.setNextKinematicTranslation(mid);
-      b.body.setNextKinematicRotation(q);
+      const [l, r] = [this.rig.get('Left'), this.rig.get('Right')];
+      if (!l || !r) return this.release(b);
+      const spread = Math.hypot(l.screen.x - r.screen.x, l.screen.y - r.screen.y);
+      if (spread > this.hold.spread0 * 1.45 + 0.02) return this.release(b);
+      const mid = { x: (l.screen.x + r.screen.x) / 2, y: (l.screen.y + r.screen.y) / 2 };
+      const midH = (handH(l.point) + handH(r.point)) / 2;
+      const lift = THREE.MathUtils.clamp(midH - this.hold.handH0, -this.hold.height, table ? 0.3 : 1.5);
+      target = this.rayAtHeight(mid, Math.max(b.half.y, this.hold.height + lift), space);
+      yaw = -(Math.atan2(r.screen.y - l.screen.y, r.screen.x - l.screen.x) - this.hold.angle0);
+    }
+    if (!target) return;
+    // Velocidad (para lanzar) a partir del movimiento del objetivo.
+    if (this.lastTarget) this.holdVel.lerp(target.clone().sub(this.lastTarget).divideScalar(Math.max(frame.dt, 1e-3)), 0.35);
+    this.lastTarget = target.clone();
+    b.body.setNextKinematicTranslation(target);
+    b.body.setNextKinematicRotation(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw).multiply(this.hold.rot));
+  }
+
+  private startHold(b: Block, how: { kind: 'one'; hand: Handedness } | { kind: 'two' }, frame: PerceptionFrame) {
+    b.body.setBodyType(this.R!.RigidBodyType.KinematicPositionBased, true);
+    const r = b.body.rotation();
+    const rot = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    const height = b.body.translation().y;
+    const handH = (p: Vec3) => planeHeight(frame.space.surface, p);
+    this.lastTarget = null;
+    this.holdVel.set(0, 0, 0);
+    if (how.kind === 'one') {
+      const h = this.rig.get(how.hand)!;
+      this.hold = { kind: 'one', hand: how.hand, block: b.id, height, handH0: handH(h.point), angle0: h.angle, rot, openSince: 0 };
+    } else {
+      const l = this.rig.get('Left')!;
+      const rr = this.rig.get('Right')!;
+      this.hold = {
+        kind: 'two',
+        block: b.id,
+        height,
+        handH0: (handH(l.point) + handH(rr.point)) / 2,
+        spread0: Math.hypot(l.screen.x - rr.screen.x, l.screen.y - rr.screen.y),
+        angle0: Math.atan2(rr.screen.y - l.screen.y, rr.screen.x - l.screen.x),
+        rot,
+      };
     }
   }
 
-  /** Orientación de la mano (local): base con la normal de la palma y la dirección de los dedos. */
-  private handQuat(h: HandState): THREE.Quaternion {
-    const c = h.camera;
-    if (!c || h.source === 'pose' || !h.normal3) return new THREE.Quaternion();
-    const n = this.anchor.camDirToLocal(h.normal3).normalize();
-    const f = this.anchor.camToLocal(c[HAND.MIDDLE_MCP]).sub(this.anchor.camToLocal(c[HAND.WRIST])).normalize();
-    const x = new THREE.Vector3().crossVectors(f, n).normalize();
-    const z = new THREE.Vector3().crossVectors(x, f).normalize();
-    return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, f, z));
-  }
-
-  private release(b: Block, v: THREE.Vector3 | null) {
+  private release(b: Block) {
     b.body.setBodyType(this.R!.RigidBodyType.Dynamic, true);
-    const tv = throwVelocity(v ?? { x: 0, y: 0, z: 0 }, this.scale < 1 ? 2 : 5);
-    b.body.setLinvel(tv, true);
+    b.body.setLinvel(throwVelocity(this.holdVel, this.scale < 1 ? 2 : 5), true);
     this.hold = null;
+    this.lastTarget = null;
   }
 
   unmount() {

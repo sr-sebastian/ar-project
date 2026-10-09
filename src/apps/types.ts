@@ -23,6 +23,12 @@ export interface AppContext {
   readonly depthEnabled: boolean;
   /** Qué partes del usuario tapan a los objetos virtuales. */
   setOcclusion(options: Partial<OcclusionOptions>): void;
+  /** Activa la segmentación de personas (siluetas en `frame.personMask`). */
+  setSegmentation(on: boolean): void;
+  /** Ajusta el campo de visión para que la distancia al jugador sea `meters`. Devuelve un mensaje. */
+  calibrateDistance(meters: number): string;
+  /** Tiempo promedio (ms) de cada etapa del cuadro. */
+  perf(): Record<string, number>;
   /** Olvida la superficie medida y vuelve a buscarla. */
   recalibrate(): void;
   /** Vuelve al menú. */

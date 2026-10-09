@@ -1,4 +1,5 @@
 import type { Vec2, Vec3 } from '../core/math';
+import type { PersonMask } from '../tracking/Segmenter';
 import type { Handedness, Landmark, RawHand, TrackingFrame } from '../tracking/types';
 import type { BodyMetrics } from './body';
 import type { Expressions, ExpressionName, HeadPose } from './expressions';
@@ -81,6 +82,11 @@ export interface SpaceState {
   axis: Vec3 | null;
   /** Marcador visible en este frame (esquinas en pantalla), para dibujar el contorno. */
   marker: MarkerPose | null;
+  /**
+   * Escala métrica del mapa de profundidad: metros = depthScale / disparidad. Se obtiene
+   * comparando la disparidad del torso del jugador con su distancia conocida.
+   */
+  depthScale: number | null;
   /** Progreso (0..1) de la calibración de mesa con la mano apoyada. */
   calibrationProgress: number;
   /** Vertical real (gravedad) en coordenadas de cámara, si la cámara es un celular con sensores. */
@@ -96,6 +102,10 @@ export interface PerceptionFrame {
   face: FaceState | null;
   body: BodyState | null;
   space: SpaceState;
+  /** Otras personas detectadas además del jugador (landmarks de pantalla). */
+  others: Landmark[][];
+  /** Silueta de las personas (si la segmentación está activa). */
+  personMask: PersonMask | null;
   timings: TrackingFrame['timings'];
 }
 

@@ -1,61 +1,12 @@
-import { dist3, dot3, sub3, type Vec3 } from '../../core/math';
+import type { Vec3 } from '../../core/math';
 
 /**
- * Lógica pura de agarre de bloques (en coordenadas locales de la superficie, metros).
- *
- * - Una mano: la mano "cerrada" (puño o pellizco) dentro del bloque o a menos de `margin`
- *   de su superficie (aproximada por su radio envolvente).
- * - Dos manos / dos brazos: las dos manos a los lados OPUESTOS del bloque, ambas a la
- *   distancia de su borde (abrazo/apretón). No hace falta cerrar las manos.
- * - Soltar a dos manos: cuando se separan más de 1.3× el ancho del bloque.
+ * Lógica pura de agarre de bloques. El agarre se decide EN PANTALLA, donde la detección
+ * de la mano es precisa; la profundidad (ruidosa) sólo descarta manos claramente delante
+ * o detrás del bloque.
+ * - Una mano: mano cerrada (puño/pellizco) sobre la caja del bloque en pantalla.
+ * - Dos manos / dos brazos: una mano a cada costado del bloque (abrazo/apretón).
  */
-export interface GrabHand {
-  id: 'Left' | 'Right';
-  pos: Vec3;
-  closed: boolean;
-}
-
-export interface GrabBlock {
-  id: number;
-  center: Vec3;
-  /** Radio envolvente aproximado (media diagonal del bloque). */
-  radius: number;
-  /** Medio ancho mínimo (para saber si la mano está "adentro"). */
-  inner: number;
-}
-
-export function findOneHandGrab(hand: GrabHand, blocks: GrabBlock[], margin: number): number | null {
-  if (!hand.closed) return null;
-  let best: number | null = null;
-  let bestD = Infinity;
-  for (const b of blocks) {
-    const d = dist3(hand.pos, b.center);
-    if (d < b.radius + margin && d < bestD) {
-      best = b.id;
-      bestD = d;
-    }
-  }
-  return best;
-}
-
-export function findTwoHandGrab(left: GrabHand, right: GrabHand, blocks: GrabBlock[], margin: number): number | null {
-  for (const b of blocks) {
-    const dl = dist3(left.pos, b.center);
-    const dr = dist3(right.pos, b.center);
-    // Cada mano junto al borde del bloque (no lejos, no hundida en el centro).
-    const nearL = dl < b.radius + margin && dl > b.inner * 0.5;
-    const nearR = dr < b.radius + margin && dr > b.inner * 0.5;
-    if (!nearL || !nearR) continue;
-    // Lados opuestos: los vectores centro→mano apuntan en sentidos contrarios.
-    const opposite = dot3(sub3(left.pos, b.center), sub3(right.pos, b.center)) < -0.3 * dl * dr;
-    if (opposite) return b.id;
-  }
-  return null;
-}
-
-export function twoHandReleased(left: Vec3, right: Vec3, blockWidth: number): boolean {
-  return dist3(left, right) > blockWidth * 1.3 + 0.05;
-}
 
 /** Velocidad de lanzamiento: la de la mano, limitada para que no salga disparado por ruido. */
 export function throwVelocity(v: Vec3, max = 5): Vec3 {
@@ -63,4 +14,53 @@ export function throwVelocity(v: Vec3, max = 5): Vec3 {
   if (s < 0.15) return { x: 0, y: 0, z: 0 };
   const k = s > max ? max / s : 1;
   return { x: v.x * k, y: v.y * k, z: v.z * k };
+}
+
+// ───────────── Agarre decidido en pantalla (preciso) ─────────────
+
+export interface ScreenBox {
+  id: number;
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  /** Profundidad del bloque (m), para descartar manos claramente delante/detrás. */
+  depth: number;
+}
+
+export interface ScreenHand {
+  x: number;
+  y: number;
+  depth: number;
+}
+
+const inside = (p: ScreenHand, b: ScreenBox, m: number) => p.x >= b.x0 - m && p.x <= b.x1 + m && p.y >= b.y0 - m && p.y <= b.y1 + m;
+
+/** Bloque bajo la mano en pantalla (el de centro más cercano), con un filtro de profundidad tolerante. */
+export function screenHover(hand: ScreenHand, boxes: ScreenBox[], margin: number, depthTolerance: number): number | null {
+  let best: number | null = null;
+  let bestD = Infinity;
+  for (const b of boxes) {
+    if (!inside(hand, b, margin) || Math.abs(hand.depth - b.depth) > depthTolerance) continue;
+    const d = Math.hypot(hand.x - (b.x0 + b.x1) / 2, hand.y - (b.y0 + b.y1) / 2);
+    if (d < bestD) {
+      bestD = d;
+      best = b.id;
+    }
+  }
+  return best;
+}
+
+/** Abrazo/apretón en pantalla: una mano a cada lado (izquierdo y derecho) del bloque. */
+export function screenTwoHandGrab(a: ScreenHand, b: ScreenHand, boxes: ScreenBox[], margin: number, depthTolerance: number): number | null {
+  const [l, r] = a.x < b.x ? [a, b] : [b, a];
+  for (const box of boxes) {
+    const cx = (box.x0 + box.x1) / 2;
+    const w = box.x1 - box.x0;
+    const sides = l.x < cx - w * 0.15 && r.x > cx + w * 0.15;
+    const near = inside(l, box, margin) && inside(r, box, margin);
+    const depthOk = Math.abs(l.depth - box.depth) < depthTolerance && Math.abs(r.depth - box.depth) < depthTolerance;
+    if (sides && near && depthOk) return box.id;
+  }
+  return null;
 }

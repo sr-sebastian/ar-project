@@ -54,7 +54,10 @@ export interface TrackingFrame {
   mirrored: boolean;
   hands: RawHand[];
   face: RawFace | null;
+  /** Persona principal (el jugador). */
   pose: RawPose | null;
+  /** Otras personas detectadas (sólo landmarks de pantalla). */
+  otherPoses: Landmark[][];
   /** Milisegundos de inferencia por módulo (para el panel de rendimiento). */
   timings: Partial<Record<TrackingModule, number>>;
 }

@@ -9,7 +9,8 @@ import { HAND_CONNECTIONS } from '../perception/landmarks';
 import { armsCrossed } from '../perception/navigation';
 import { Perception } from '../perception/Perception';
 import { DepthEstimator } from '../perception/space/DepthEstimator';
-import { MARKER_IDS, MarkerTracker } from '../perception/space/marker';
+import { hfovFromFocal, MARKER_IDS, MarkerTracker } from '../perception/space/marker';
+import { PersonSegmenter } from '../tracking/Segmenter';
 import { intrinsicsFromFov } from '../perception/space/surface';
 import type { PerceptionFrame, SurfaceSource } from '../perception/types';
 import { Tracker } from '../tracking/Tracker';
@@ -39,6 +40,12 @@ export class App {
   private tracker: Tracker;
   private depth = new DepthEstimator();
   private markers = new MarkerTracker();
+  private segmenter = new PersonSegmenter();
+  /** Silueta pedida explícitamente por una app (además de la oclusión del cuerpo). */
+  private wantSegmentation = false;
+  /** Estimaciones recientes del FOV a partir del marcador (autocalibración). */
+  private fovSamples: number[] = [];
+  private lastFovUpdate = 0;
   private perception: Perception;
   private occluders: Occluders;
   private cursor: HandCursor;
@@ -50,6 +57,8 @@ export class App {
   private fps = 0;
   private guideDismissed = false;
   private moduleStatus = new Map<TrackingModule, string>();
+  /** Tiempo promedio (ms) de cada etapa del cuadro, para el visor. */
+  readonly perf: Record<string, number> = {};
   private el: Record<'menu' | 'appLayer' | 'panel' | 'status' | 'surface' | 'toasts' | 'title' | 'fps' | 'back' | 'guide' | 'recal', HTMLElement>;
 
   constructor(root: HTMLElement) {
@@ -119,6 +128,7 @@ export class App {
       else if (this.current) this.goHome();
     });
 
+    if (import.meta.env.DEV) (window as unknown as { __arPerf: Record<string, number> }).__arPerf = this.perf;
     if (this.settings.depthEnabled) this.depth.start();
     this.goHome();
     this.resize();
@@ -191,6 +201,44 @@ export class App {
 
   private spaceConfig() {
     return { kind: MODES[this.settings.mode].surface, hfov: this.calibration.hfov, tableTilt: this.calibration.tableTilt };
+  }
+
+  /**
+   * Autocalibración del campo de visión con el marcador inclinado: junta estimaciones de la
+   * distancia focal y, cuando son estables, ajusta el FOV de esta cámara.
+   */
+  private autoCalibrateFov(focals: number[]) {
+    for (const f of focals) this.fovSamples.push(hfovFromFocal(f, this.video.videoWidth));
+    if (this.fovSamples.length > 30) this.fovSamples.splice(0, this.fovSamples.length - 30);
+    const now = performance.now();
+    if (this.fovSamples.length < 12 || now - this.lastFovUpdate < 4000) return;
+    const sorted = [...this.fovSamples].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const spread = sorted[Math.floor(sorted.length * 0.8)] - sorted[Math.floor(sorted.length * 0.2)];
+    if (spread > 4 || median < 35 || median > 125) return;
+    this.lastFovUpdate = now;
+    if (Math.abs(median - this.calibration.hfov) < 1.5) return;
+    this.calibration.hfov = Math.round(median * 10) / 10;
+    this.saveCalibration();
+    this.perception.recalibrate();
+    this.toast(`Cámara calibrada con el marcador: campo de visión ${this.calibration.hfov.toFixed(1)}°`, 4000);
+  }
+
+  /**
+   * Calibra el FOV para que la distancia medida al jugador sea `meters`. La distancia es
+   * proporcional a la focal: z ∝ f ∝ 1/tan(fov/2).
+   */
+  private calibrateDistance(meters: number): string {
+    const body = this.frame?.body?.camera;
+    if (!body || !(meters > 0.3)) return 'No veo tu cuerpo: ponete frente a la cámara con el torso visible.';
+    const z = (body[11].z + body[12].z + body[23].z + body[24].z) / 4;
+    const t = Math.tan((this.calibration.hfov * Math.PI) / 360) * (z / meters);
+    const hfov = (2 * Math.atan(t) * 180) / Math.PI;
+    if (!(hfov > 30 && hfov < 125)) return `El resultado (${hfov.toFixed(0)}°) no es razonable: revisá la distancia que ingresaste.`;
+    this.calibration.hfov = Math.round(hfov * 10) / 10;
+    this.saveCalibration();
+    this.perception.recalibrate();
+    return `Listo: campo de visión ${this.calibration.hfov.toFixed(1)}° (medías ${z.toFixed(2)} m, ahora ${meters.toFixed(2)} m).`;
   }
 
   private recalibrate() {
@@ -298,6 +346,9 @@ export class App {
         return settings.depthEnabled;
       },
       setOcclusion: (opts) => (this.occluders.options = { ...this.occluders.options, ...opts }),
+      setSegmentation: (on) => (this.wantSegmentation = on),
+      calibrateDistance: (m) => this.calibrateDistance(m),
+      perf: () => this.perf,
       recalibrate: () => this.recalibrate(),
       exit: () => this.goHome(),
       toast: (m, ms) => this.toast(m, ms),
@@ -314,6 +365,7 @@ export class App {
     this.current = null;
     this.cursor.setVisible(true);
     this.occluders.options = { hands: false, body: false };
+    this.wantSegmentation = false;
     this.el.guide.hidden = true;
   }
 
@@ -408,7 +460,10 @@ export class App {
       <section>
         <h3>${icon('recalibrate', 18)} Calibración <small>${this.source?.label ?? ''}</small></h3>
         <label class="row"><input type="checkbox" data-k="mirror" ${c.mirror ? 'checked' : ''}/> Espejar imagen</label>
-        <label>Campo de visión: <b data-v="hfov">${c.hfov}°</b><input type="range" min="40" max="110" value="${c.hfov}" data-k="hfov"/></label>
+        <label>Campo de visión: <b data-v="hfov">${c.hfov}°</b><input type="range" min="40" max="120" step="0.5" value="${c.hfov}" data-k="hfov"/></label>
+        <p class="small">Para que las distancias sean reales: mostrale el marcador inclinado a la cámara (se calibra solo) o parate a una distancia medida y tocá Calibrar.</p>
+        <div class="row-inline"><input type="number" step="0.1" min="0.5" max="8" value="2.5" data-k="distM"/><span>m</span><button class="btn-secondary" data-k="distCal">${icon('recalibrate', 16)} Calibrar distancia</button></div>
+        <p class="small" data-v="distMsg"></p>
         <label>Inclinación de la cámara (mesa sin calibrar): <b data-v="tableTilt">${c.tableTilt}°</b><input type="range" min="10" max="85" value="${c.tableTilt}" data-k="tableTilt"/></label>
       </section>
       <section>
@@ -439,6 +494,12 @@ export class App {
       void this.useSource(new DeviceCameraSource(id, label)).catch((err) => this.toast(`Error: ${err.message ?? err}`));
     };
     get<HTMLButtonElement>('phone').onclick = () => void this.connectPhone(p.querySelector('.qr')!);
+    get<HTMLButtonElement>('distCal').onclick = () => {
+      const m = Number(get<HTMLInputElement>('distM').value);
+      p.querySelector('[data-v="distMsg"]')!.textContent = this.calibrateDistance(m);
+      p.querySelector('[data-v="hfov"]')!.textContent = `${this.calibration.hfov}°`;
+      get<HTMLInputElement>('hfov').value = String(this.calibration.hfov);
+    };
     get<HTMLInputElement>('mirror').onchange = (e) => {
       this.calibration.mirror = (e.target as HTMLInputElement).checked;
       this.saveCalibration();
@@ -512,30 +573,49 @@ export class App {
     this.fps = this.fps * 0.95 + (1 / dt) * 0.05;
 
     this.overlay.clear();
+    let mark = performance.now();
+    const lap = (name: string) => {
+      const now = performance.now();
+      this.perf[name] = (this.perf[name] ?? 0) * 0.8 + (now - mark) * 0.2;
+      mark = now;
+    };
     try {
       const raw = this.tracker.process(this.video, this.calibration.mirror);
+      lap('tracking');
       // Marcadores: sólo con una app que use la superficie (es análisis por CPU).
       if (this.current?.def.usesSurface && this.video.videoWidth) {
         const k = intrinsicsFromFov(this.video.videoWidth, this.video.videoHeight, this.calibration.hfov);
         const sizes = { [MARKER_IDS.table]: this.settings.markerSizes.table, [MARKER_IDS.floor]: this.settings.markerSizes.floor };
-        this.perception.setMarkers(this.markers.update(this.video, this.calibration.mirror, k, sizes));
+        const det = this.markers.update(this.video, this.calibration.mirror, k, sizes);
+        this.perception.setMarkers(det?.poses ?? null);
+        if (det?.focals.length) this.autoCalibrateFov(det.focals);
       }
+      lap('marcadores');
       if (raw) this.frame = this.perception.update(raw);
       if (this.depth.running) this.depth.update(this.video, this.calibration.mirror);
       this.scene.estimateLighting(this.video);
+      // Siluetas: para la oclusión del cuerpo o si una app las pide (visor).
+      const segment = this.wantSegmentation || this.occluders.options.body;
+      lap('percepción');
+      if (segment) this.segmenter.update(this.video, this.calibration.mirror);
+      lap('siluetas');
+      this.perception.personMask = segment ? this.segmenter.latest : null;
       this.occluders.update(this.frame);
       this.cursor.backEnabled = !!this.current && this.current.instance.allowBack !== false;
       this.cursor.update(this.frame?.hands ?? [], this.frame ? armsCrossed(this.frame) : false, nowMs);
 
+      lap('oclusión+cursor');
       if (this.current) {
         this.current.instance.update(this.frame, dt);
         this.drawMarker();
       } else this.drawMenuHands();
       this.renderSurfaceStatus();
+      lap('app');
     } catch (err) {
       console.error(err);
     }
     this.scene.render();
+    lap('render');
     this.el.fps.textContent = `${Math.round(this.fps)} fps`;
     requestAnimationFrame((t) => this.tick(t));
   }

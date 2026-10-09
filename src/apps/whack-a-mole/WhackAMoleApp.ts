@@ -2,13 +2,14 @@ import * as THREE from 'three';
 import type { Vec2 } from '../../core/math';
 import { storage } from '../../core/settings';
 import { customModel, preloadModel } from '../../models/library';
-import { createMole, createMoleBoard } from '../../models/props';
-import { HAND } from '../../perception/landmarks';
-import type { HandState, PerceptionFrame } from '../../perception/types';
+import { SceneManager } from '../../core/SceneManager';
+import { createHammer, createMole, createMoleBoard } from '../../models/props';
+import type { PerceptionFrame } from '../../perception/types';
 import { icon } from '../../ui/icons';
+import { HandRig, screenBox } from '../shared/HandRig';
 import { SurfaceAnchor } from '../shared/SurfaceAnchor';
 import type { AppContext, AppDefinition, AppInstance } from '../types';
-import { WhackAMoleGame, type WhackEvent } from './logic';
+import { swingHit, WhackAMoleGame, type WhackEvent } from './logic';
 
 const COLS = 3;
 const ROWS = 3;
@@ -18,8 +19,6 @@ const HOLE_R = 0.042;
 const MOLE_H = 0.1;
 const BOARD = SPACING * (COLS - 1) + HOLE_R * 5;
 const BOARD_TOP = 0.02;
-/** Velocidad hacia la mesa (m/s) que cuenta como golpe. */
-const SLAM_SPEED = 0.25;
 
 interface Pow {
   at: Vec2;
@@ -44,11 +43,13 @@ class WhackAMoleApp implements AppInstance {
   private holes: THREE.Vector3[] = [];
   private clip = new THREE.Plane();
   private pows: Pow[] = [];
-  private prevGesture: Record<string, string> = {};
   private hud!: { score: HTMLElement; time: HTMLElement; msg: HTMLElement; freeze: HTMLElement };
   private best = storage.get<number>('whack-a-mole:best', 0);
   private offEvents: (() => void)[] = [];
   private now = 0;
+  private rig = new HandRig();
+  private hammer = createHammer(0.24);
+  private lastHead: Vec2 | null = null;
 
   mount(ctx: AppContext) {
     this.ctx = ctx;
@@ -69,7 +70,9 @@ class WhackAMoleApp implements AppInstance {
     };
     this.anchor = new SurfaceAnchor(ctx.scene, BOARD * 1.6);
     this.buildBoard();
-    this.showIdle(`${icon('hammer', 26)} Aplastá al Topo`, `Golpeá los topos bajando la mano sobre ellos. Levantá las cejas para congelarlos (una vez). Récord: <b>${this.best}</b>`);
+    this.hammer.group.visible = false;
+    ctx.scene.scene.add(this.hammer.group);
+    this.showIdle(`${icon('hammer', 26)} Aplastá al Topo`, `El martillo aparece en tu mano: dale un martillazo rápido a cada topo que asome. Levantá las cejas para congelarlos (una vez). Récord: <b>${this.best}</b>`);
 
     this.offEvents.push(
       ctx.events.on('gesture', (e) => {
@@ -122,40 +125,63 @@ class WhackAMoleApp implements AppInstance {
     }
   }
 
-  /** Posición (local del tablero) de los puntos de golpe de una mano. */
-  private contacts(h: HandState): THREE.Vector3[] {
-    const c = h.camera;
-    if (!c || h.source === 'pose') return [];
-    return [h.palm3!, c[HAND.INDEX_TIP], c[HAND.MIDDLE_TIP], c[HAND.RING_TIP], c[HAND.WRIST]].map((p) => this.anchor.camToLocal(p));
+  /** Zona en pantalla que ocupa cada topo (de la base del agujero a la cabeza). */
+  private moleRegions(aspect: number) {
+    return this.holes.map((hole, i) => {
+      const h = BOARD_TOP + MOLE_H * Math.max(0.3, this.game.moles[i].height);
+      const pts: Vec2[] = [];
+      for (const y of [BOARD_TOP, h]) {
+        for (const [dx, dz] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          pts.push(this.anchor.localToNorm(new THREE.Vector3(hole.x + dx * HOLE_R * 1.2, y, hole.z + dz * HOLE_R * 1.2)));
+        }
+      }
+      // Margen generoso: el golpe se decide en pantalla, donde la detección es precisa.
+      return screenBox(pts, 0.02, aspect);
+    });
   }
 
-  private detectSmashes(hands: HandState[]): number[] {
-    const smashed = new Set<number>();
-    for (const h of hands) {
-      const becameFist = h.gesture === 'fist' && this.prevGesture[h.handedness] !== 'fist';
-      this.prevGesture[h.handedness] = h.gesture;
-      // Velocidad hacia la mesa: componente de la velocidad contra la normal (local -Y).
-      const v = this.anchor.camDirToLocal(h.velocity3);
-      const slamming = -v.y > SLAM_SPEED;
-      if (!slamming && !becameFist) continue;
-      const pts = this.contacts(h);
-      this.holes.forEach((hole, i) => {
-        const top = BOARD_TOP + MOLE_H * this.game.moles[i].height;
-        const hit = pts.some((p) => Math.hypot(p.x - hole.x, p.z - hole.z) < HOLE_R * 1.6 && p.y < top + 0.04);
-        if (hit) smashed.add(i);
-      });
+  /** Coloca el martillo en la mano (o lo oculta) y devuelve la cabeza en pantalla. */
+  private updateHammer(): { head: Vec2; peak: number } | null {
+    const hand = this.rig.primary();
+    if (!hand || hand.hand.source === 'pose') {
+      this.hammer.group.visible = false;
+      return null;
     }
-    return [...smashed];
+    this.hammer.group.visible = true;
+    // Mango en el plano de la imagen, según el ángulo de la mano (estable), apenas inclinado.
+    const dir = this.ctx.scene.camDirToWorld({ x: Math.cos(hand.angle), y: Math.sin(hand.angle), z: 0.15 }).normalize();
+    const pos = this.ctx.scene.camToWorld(hand.point);
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
+    this.hammer.group.position.lerp(pos, 0.6);
+    this.hammer.group.quaternion.slerp(q, 0.4);
+    this.hammer.group.updateMatrixWorld(true);
+    const headWorld = this.hammer.head.clone().applyMatrix4(this.hammer.group.matrixWorld);
+    const n = this.ctx.scene.worldToNorm(headWorld);
+    return { head: { x: n.x, y: n.y }, peak: hand.recentPeak };
+  }
+
+  private detectSmashes(aspect: number): number[] {
+    const hammer = this.updateHammer();
+    if (!hammer) return [];
+    this.lastHead = hammer.head;
+    const regions = this.moleRegions(aspect);
+    const smashed: number[] = [];
+    regions.forEach((r, i) => {
+      if (swingHit(hammer.head, hammer.peak, r)) smashed.push(i);
+    });
+    return smashed;
   }
 
   update(frame: PerceptionFrame | null, dt: number) {
     this.now += dt;
     if (frame) this.anchor.update(frame.space);
+    this.rig.update(frame, (p, z) => this.ctx.scene.worldToCam(this.ctx.scene.normToWorld(p, z)), 0.6);
+    const aspect = frame?.aspect ?? this.ctx.scene.viewport.videoAspect;
     // Plano de recorte = superficie del tablero, normal hacia arriba (mundo).
     const up = new THREE.Vector3(0, 1, 0).transformDirection(this.anchor.group.matrixWorld);
     this.clip.setFromNormalAndCoplanarPoint(up, this.anchor.localToWorld(new THREE.Vector3(0, BOARD_TOP, 0)));
 
-    const smashes = frame && this.game.state === 'playing' ? this.detectSmashes(frame.hands) : [];
+    const smashes = this.detectSmashes(aspect).filter(() => this.game.state === 'playing');
     for (const e of this.game.update(dt, smashes)) this.onEvent(e);
 
     this.game.moles.forEach((m, i) => {
@@ -201,22 +227,17 @@ class WhackAMoleApp implements AppInstance {
       o.text({ x: p.at.x, y: p.at.y - t * 0.08 }, p.text, { size: 32, color: p.color, font: '800' });
       o.ctx.globalAlpha = 1;
     }
-    // Indicador de golpe bajo cada mano (proyección sobre el tablero).
-    if (this.game.state === 'playing') {
-      for (const h of frame?.hands ?? []) {
-        if (!h.palm3) continue;
-        const local = this.anchor.camToLocal(h.palm3);
-        const height = Math.max(0, local.y);
-        const onBoard = this.anchor.localToNorm(local.clone().setY(BOARD_TOP));
-        const slam = -this.anchor.camDirToLocal(h.velocity3).y > SLAM_SPEED;
-        o.circle(onBoard, Math.max(6, 22 - height * 120), slam ? 'rgba(255,90,90,0.35)' : 'rgba(255,255,255,0.18)', slam ? '#ff6b6b' : 'rgba(255,255,255,0.7)', 2);
-      }
+    // Sombra/objetivo de la cabeza del martillo sobre el tablero.
+    if (this.lastHead && this.hammer.group.visible && frame) {
+      const fast = (this.rig.primary()?.recentPeak ?? 0) > 0.9;
+      o.circle(this.lastHead, fast ? 20 : 14, fast ? 'rgba(255,90,90,0.3)' : 'rgba(255,255,255,0.12)', fast ? '#ff6b6b' : 'rgba(255,255,255,0.6)', 2);
     }
   }
 
   unmount() {
     this.offEvents.forEach((off) => off());
     this.anchor.dispose();
+    SceneManager.disposeObject(this.hammer.group);
     this.ctx.cursor.setVisible(true);
   }
 }

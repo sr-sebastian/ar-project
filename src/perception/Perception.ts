@@ -12,6 +12,7 @@ import type { DepthEstimator } from './space/DepthEstimator';
 import { MARKER_IDS, type MarkerPose } from './space/marker';
 import {
   defaultSurface,
+  disparityAt,
   fitDisparityPlane,
   intrinsicsFromFov,
   normalFromDisparityFit,
@@ -24,6 +25,7 @@ import {
   type Plane,
   type SurfaceKind,
 } from './space/surface';
+import type { PersonMask } from '../tracking/Segmenter';
 import type { HandState, PerceptionEvents, PerceptionFrame, SpaceState, SurfaceSource } from './types';
 
 /** Filtro One-Euro para un vector 3D (traslaciones métricas). */
@@ -91,8 +93,12 @@ export class Perception {
   /** Último marcador visto para el modo actual (queda fijo aunque se tape). */
   private marker: MarkerPose | null = null;
   private markerVisible: MarkerPose | null = null;
+  private markerPending: MarkerPose[] = [];
   /** Vertical (opuesta a la gravedad) en coordenadas de cámara enviada por el celular. */
   up: Vec3 | null = null;
+  /** Última silueta de personas (la provee el shell si la segmentación está activa). */
+  personMask: PersonMask | null = null;
+  private depthScale: number | null = null;
 
   constructor(
     public space: SpaceConfig,
@@ -116,23 +122,40 @@ export class Perception {
     this.marker = null;
   }
 
-  /** Marcadores detectados en el último análisis (null = no se analizó este frame). */
+  /**
+   * Marcadores detectados en el último análisis (null = no se analizó este frame).
+   *
+   * Robustez cuando se tapa o se pisa: si el marcador no se ve, la superficie queda fija
+   * en la última pose buena. Una vez fijado, una lectura muy distinta (> 5 cm o > 10°)
+   * se ignora salvo que se repita de forma consistente varias veces (eso sí indica que se
+   * movió el marcador o la cámara); así un pie o una mano que tapa una esquina no lo mueve.
+   */
   setMarkers(poses: MarkerPose[] | null) {
     if (!poses) return;
     const wanted = MARKER_IDS[this.space.kind];
     const m = poses.find((p) => p.id === wanted) ?? null;
     this.markerVisible = m;
     if (!m) return;
-    // Suavizado: mezcla con la pose anterior si es coherente.
-    if (this.marker && dot3(this.marker.normal, m.normal) > 0.9) {
+    const close = (a: MarkerPose, b: MarkerPose) =>
+      Math.hypot(a.center.x - b.center.x, a.center.y - b.center.y, a.center.z - b.center.z) < 0.05 && dot3(a.normal, b.normal) > Math.cos((10 * Math.PI) / 180);
+    if (!this.marker) {
+      this.marker = m;
+      this.markerPending = [];
+      return;
+    }
+    if (close(this.marker, m)) {
+      this.markerPending = [];
       const b = (a: Vec3, c: Vec3, t: number) => add3(scale3(a, 1 - t), scale3(c, t));
-      this.marker = {
-        ...m,
-        center: b(this.marker.center, m.center, 0.35),
-        normal: blend(this.marker.normal, m.normal, 0.35),
-        xAxis: blend(this.marker.xAxis, m.xAxis, 0.35),
-      };
-    } else this.marker = m;
+      this.marker = { ...m, center: b(this.marker.center, m.center, 0.25), normal: blend(this.marker.normal, m.normal, 0.25), xAxis: blend(this.marker.xAxis, m.xAxis, 0.25) };
+      return;
+    }
+    // Lectura distinta: sólo se acepta si se repite consistentemente.
+    if (this.markerPending.length && !close(this.markerPending[this.markerPending.length - 1], m)) this.markerPending = [];
+    this.markerPending.push(m);
+    if (this.markerPending.length >= 5) {
+      this.marker = m;
+      this.markerPending = [];
+    }
   }
 
   get tableCalibrated() {
@@ -198,6 +221,8 @@ export class Perception {
       face,
       body,
       space: this.updateSpace(k, body, hands, t),
+      others: frame.otherPoses,
+      personMask: this.personMask,
       timings: frame.timings,
     };
   }
@@ -299,10 +324,12 @@ export class Perception {
     if (map && map !== this.lastDepth) {
       this.lastDepth = map;
       this.fitDepth(map);
+      this.updateDepthScale(map, body);
     }
     if (!this.depth.running) {
       this.depthNormal = null;
       this.depthRegion = null;
+      this.depthScale = null;
     }
 
     if (this.marker) {
@@ -369,11 +396,29 @@ export class Perception {
       surfaceSource: source,
       center,
       extent,
+      depthScale: this.depthScale,
       calibrationProgress: this.table.progress,
       axis: this.marker?.xAxis ?? null,
       marker: this.markerVisible,
       up: this.up,
     };
+  }
+
+  /**
+   * Escala métrica del mapa: la disparidad del torso del jugador (mediana de hombros y
+   * caderas) por su distancia en metros. Con eso, metros = escala / disparidad en toda la
+   * imagen (paredes, muebles, otras personas).
+   */
+  private updateDepthScale(map: DepthMap, body: PerceptionFrame['body']) {
+    if (!body?.camera) return;
+    const ids = [POSE.LEFT_SHOULDER, POSE.RIGHT_SHOULDER, POSE.LEFT_HIP, POSE.RIGHT_HIP].filter((i) => (body.landmarks[i].visibility ?? 0) > 0.6);
+    if (ids.length < 2) return;
+    const disp = ids.map((i) => disparityAt(map, body.landmarks[i].x, body.landmarks[i].y)).sort((a, b) => a - b);
+    const d = disp[Math.floor(disp.length / 2)];
+    const z = ids.reduce((s, i) => s + body.camera![i].z, 0) / ids.length;
+    if (d < 0.02 || !(z > 0.2)) return;
+    const a = d * z;
+    this.depthScale = this.depthScale ? this.depthScale * 0.8 + a * 0.2 : a;
   }
 
   private fitDepth(map: DepthMap) {

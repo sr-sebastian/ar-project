@@ -199,3 +199,39 @@ export function createMoleBoard(width: number, depth: number, holes: THREE.Vecto
   }
   return g;
 }
+
+/**
+ * Martillo de feria (mazo de goma) para Aplastá al Topo. Medidas en metros; origen en el
+ * centro de la empuñadura, mango a lo largo de +X y cabeza en el extremo +X (perpendicular).
+ * `head` (local) es el centro de la cabeza, para detectar golpes.
+ */
+export function createHammer(length = 0.24): { group: THREE.Group; head: THREE.Vector3 } {
+  const g = new THREE.Group();
+  const handleR = length * 0.045;
+  const handle = new THREE.Mesh(
+    new THREE.CylinderGeometry(handleR, handleR * 1.15, length, 16).rotateZ(Math.PI / 2),
+    new THREE.MeshStandardMaterial({ map: woodTexture('#d4a15c'), roughness: 0.6 }),
+  );
+  handle.position.x = length * 0.3;
+  handle.castShadow = true;
+  const grip = new THREE.Mesh(
+    new THREE.CylinderGeometry(handleR * 1.25, handleR * 1.25, length * 0.35, 16).rotateZ(Math.PI / 2),
+    new THREE.MeshStandardMaterial({ color: 0x1e3a8a, roughness: 0.9 }),
+  );
+  const headLen = length * 0.42;
+  const headR = length * 0.14;
+  const head = new THREE.Mesh(
+    new THREE.CylinderGeometry(headR, headR, headLen, 28),
+    new THREE.MeshPhysicalMaterial({ color: 0xef4444, roughness: 0.35, clearcoat: 0.8, clearcoatRoughness: 0.2 }),
+  );
+  const headPos = new THREE.Vector3(length * 0.8, 0, 0);
+  head.position.copy(headPos);
+  head.castShadow = true;
+  for (const s of [-1, 1]) {
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(headR * 1.02, headR * 1.02, headLen * 0.12, 28), new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.6, roughness: 0.3 }));
+    cap.position.set(headPos.x, (s * headLen) / 2, 0);
+    g.add(cap);
+  }
+  g.add(handle, grip, head);
+  return { group: g, head: headPos };
+}

@@ -29,6 +29,10 @@ class DebugApp implements AppInstance {
   private cloud: THREE.Points | null = null;
   private showCloud = false;
   private occlusion = false;
+  private silhouettes = true;
+  private maskCanvas = document.createElement('canvas');
+  private lastMaskT = -1;
+  private depthStats = '';
   private lastDepth: unknown = null;
   private logLines: string[] = [];
   private offEvents: (() => void)[] = [];
@@ -41,7 +45,14 @@ class DebugApp implements AppInstance {
           <button data-act="depth">${icon('layers', 16)} Profundidad: <b>${ctx.depthEnabled ? 'ON' : 'OFF'}</b></button>
           <button data-act="cloud">${icon('sparkles', 16)} Nube</button>
           <button data-act="occ">${icon('hand', 16)} Oclusión</button>
+          <button data-act="sil" class="active">${icon('body', 16)} Siluetas</button>
         </div>
+        <div class="debug-calib">
+          <span>${icon('recalibrate', 16)} Distancia real</span>
+          <input type="number" step="0.1" min="0.5" max="8" value="2.5" data-k="dist"/> m
+          <button data-act="dist">Calibrar</button>
+        </div>
+        <small class="debug-calib-msg"></small>
         <div class="debug-body"></div>
         <canvas class="depth-thumb" hidden></canvas>
         <div class="debug-log"></div>
@@ -56,6 +67,16 @@ class DebugApp implements AppInstance {
       this.occlusion = !this.occlusion;
       ctx.setOcclusion({ hands: this.occlusion, body: this.occlusion });
       (e.currentTarget as HTMLElement).classList.toggle('active', this.occlusion);
+    };
+    ctx.setSegmentation(true);
+    ctx.ui.querySelector<HTMLButtonElement>('[data-act="sil"]')!.onclick = (e) => {
+      this.silhouettes = !this.silhouettes;
+      ctx.setSegmentation(this.silhouettes);
+      (e.currentTarget as HTMLElement).classList.toggle('active', this.silhouettes);
+    };
+    ctx.ui.querySelector<HTMLButtonElement>('[data-act="dist"]')!.onclick = () => {
+      const m = Number(ctx.ui.querySelector<HTMLInputElement>('[data-k="dist"]')!.value);
+      ctx.ui.querySelector('.debug-calib-msg')!.textContent = ctx.calibrateDistance(m);
     };
     ctx.ui.querySelector<HTMLButtonElement>('[data-act="cloud"]')!.onclick = () => {
       this.showCloud = !this.showCloud;
@@ -83,6 +104,7 @@ class DebugApp implements AppInstance {
 
   update(frame: PerceptionFrame | null) {
     const o = this.ctx.overlay;
+    if (frame?.personMask && this.silhouettes) this.drawSilhouettes(frame);
     if (!frame) {
       this.panel.innerHTML = '<p>Esperando tracking…</p>';
       return;
@@ -94,6 +116,13 @@ class DebugApp implements AppInstance {
       for (const p of lm) if ((p.visibility ?? 1) > 0.5) o.circle(p, 4, '#fff');
       const m = frame.body.metrics;
       if (m.floorY !== null) o.line({ x: 0, y: m.floorY }, { x: 1, y: m.floorY }, 'rgba(255,200,80,0.6)', 2);
+    }
+
+    // Otras personas (no son el jugador).
+    for (const other of frame.others) {
+      o.skeleton(other, POSE_CONNECTIONS, 'rgba(200,200,220,0.55)', 3, (i) => other[i].visibility ?? 1);
+      const nose = other[0];
+      if ((nose.visibility ?? 0) > 0.5) o.text({ x: nose.x, y: nose.y - 0.06 }, 'otra persona', { size: 13, color: '#ccd' });
     }
 
     for (const h of frame.hands) {
@@ -120,25 +149,41 @@ class DebugApp implements AppInstance {
     if (!depth || depth === this.lastDepth) return;
     this.lastDepth = depth;
 
-    // Miniatura del mapa de profundidad.
+    // Miniatura del mapa de profundidad: en metros si hay escala (el cuerpo da la escala),
+    // si no, disparidad relativa con normalización robusta por percentiles.
     const c = this.depthCanvas;
     c.width = depth.width;
     c.height = depth.height;
     const g = c.getContext('2d')!;
     const img = g.createImageData(depth.width, depth.height);
+    const scale = space.depthScale;
+    const sorted = Float32Array.from(depth.data).sort();
+    const pct = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+    const lo = pct(0.02);
+    const hi = pct(0.98);
     for (let i = 0; i < depth.data.length; i++) {
-      const v = depth.data[i] * 255;
-      img.data[i * 4] = v;
-      img.data[i * 4 + 1] = v * 0.6;
-      img.data[i * 4 + 2] = 255 - v;
+      const d = depth.data[i];
+      // t: 0 = lejos, 1 = cerca.
+      let t: number;
+      if (scale) {
+        const z = Math.min(12, Math.max(0.3, scale / Math.max(d, 1e-3)));
+        t = 1 - Math.log(z / 0.3) / Math.log(12 / 0.3);
+      } else t = (d - lo) / (hi - lo || 1);
+      const [r, gg, b] = turbo(Math.min(1, Math.max(0, t)));
+      img.data[i * 4] = r;
+      img.data[i * 4 + 1] = gg;
+      img.data[i * 4 + 2] = b;
       img.data[i * 4 + 3] = 255;
     }
     g.putImageData(img, 0, 0);
+    this.depthStats = scale
+      ? `cerca ${(scale / Math.max(pct(0.98), 1e-3)).toFixed(1)} m · fondo ${(scale / Math.max(pct(0.05), 1e-3)).toFixed(1)} m`
+      : 'relativa (falta el cuerpo para dar metros)';
 
     // Nube de puntos en la escena 3D (coordenadas de cámara → Three).
     const k = space.intrinsics;
     const kd = { ...k, fx: (k.fx * depth.width) / k.width, fy: (k.fy * depth.height) / k.height, cx: depth.width / 2, cy: depth.height / 2, width: depth.width, height: depth.height };
-    const pts = depthToPoints(depth, kd, 3);
+    const pts = depthToPoints(depth, kd, 3).map((p) => (scale ? { x: p.x * scale, y: p.y * scale, z: p.z * scale } : p));
     const positions = new Float32Array(pts.length * 3);
     const colors = new Float32Array(pts.length * 3);
     pts.forEach((p, i) => {
@@ -159,6 +204,8 @@ class DebugApp implements AppInstance {
     const rows: string[] = [];
     const t = frame.timings;
     rows.push(`<div class="kv"><span>Inferencia</span><b>${['pose', 'hands', 'face'].map((k) => `${k}: ${t[k as keyof typeof t]?.toFixed(0) ?? '–'}ms`).join(' · ')}</b></div>`);
+    const perf = this.ctx.perf();
+    rows.push(`<div class="kv"><span>Cuadro</span><b>${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(0)}`).join(' · ')} ms</b></div>`);
 
     if (frame.body) {
       const m = frame.body.metrics;
@@ -198,6 +245,8 @@ class DebugApp implements AppInstance {
     const SRC = { marker: 'marcador', body: 'cuerpo', hand: 'mano apoyada', depth: 'profundidad IA', assumed: 'supuesta' } as const;
     rows.push(kv('Fuente', SRC[s.surfaceSource]));
     rows.push(kv('Profundidad IA', s.depthStatus));
+    if (s.depth) rows.push(kv('Mapa', this.depthStats));
+    rows.push(kv('Personas', String((frame.body ? 1 : 0) + frame.others.length)));
     rows.push(kv('Cámara sobre superficie', `${s.surface.d.toFixed(2)} m`));
     const n = s.surface.normal;
     rows.push(kv('Normal', `${n.x.toFixed(2)}, ${n.y.toFixed(2)}, ${n.z.toFixed(2)}`));
@@ -205,11 +254,43 @@ class DebugApp implements AppInstance {
     this.panel.innerHTML = rows.join('');
   }
 
+  /** Siluetas de personas (máscara de segmentación) teñidas sobre el video. */
+  private drawSilhouettes(frame: PerceptionFrame) {
+    const mask = frame.personMask!;
+    const c = this.maskCanvas;
+    if (mask.t !== this.lastMaskT) {
+      this.lastMaskT = mask.t;
+      c.width = mask.width;
+      c.height = mask.height;
+      const g = c.getContext('2d')!;
+      const img = g.createImageData(mask.width, mask.height);
+      for (let i = 0; i < mask.data.length; i++) {
+        const a = mask.data[i];
+        img.data[i * 4] = 60;
+        img.data[i * 4 + 1] = 200;
+        img.data[i * 4 + 2] = 255;
+        img.data[i * 4 + 3] = a > 0.5 ? 90 : 0;
+      }
+      g.putImageData(img, 0, 0);
+    }
+    const vp = this.ctx.scene.viewport;
+    this.ctx.overlay.ctx.drawImage(c, vp.offsetX, vp.offsetY, vp.displayWidth, vp.displayHeight);
+  }
+
   unmount() {
     this.offEvents.forEach((off) => off());
     this.anchor.dispose();
     if (this.cloud) SceneManager.disposeObject(this.cloud);
   }
+}
+
+/** Mapa de color "turbo" (aproximación polinómica de Mikhailov, Google): 0 azul oscuro → 1 rojo. */
+function turbo(t: number): [number, number, number] {
+  const r = 0.13572138 + t * (4.6153926 + t * (-42.66032258 + t * (132.13108234 + t * (-152.94239396 + t * 59.28637943))));
+  const g = 0.09140261 + t * (2.19418839 + t * (4.84296658 + t * (-14.18503333 + t * (4.27729857 + t * 2.82956604))));
+  const b = 0.1066733 + t * (12.64194608 + t * (-60.58204836 + t * (110.36276771 + t * (-89.90310912 + t * 27.34824973))));
+  const c = (x: number) => Math.max(0, Math.min(255, x * 255));
+  return [c(r), c(g), c(b)];
 }
 
 const kv = (k: string, v: string) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;

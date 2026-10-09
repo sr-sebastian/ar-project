@@ -157,3 +157,18 @@ export class WhackAMoleGame {
     });
   }
 }
+
+/**
+ * Golpe con el martillo, decidido EN PANTALLA (preciso) y no en profundidad (ruidosa):
+ * cuenta si la cabeza del martillo está sobre la zona del topo y hubo un movimiento
+ * rápido reciente (un "martillazo"), en cualquier dirección.
+ */
+export function swingHit(
+  head: { x: number; y: number },
+  recentPeakSpeed: number,
+  region: { x0: number; x1: number; y0: number; y1: number },
+  minSpeed = 0.9,
+): boolean {
+  const inside = head.x >= region.x0 && head.x <= region.x1 && head.y >= region.y0 && head.y <= region.y1;
+  return inside && recentPeakSpeed >= minSpeed;
+}

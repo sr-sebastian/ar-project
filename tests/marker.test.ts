@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { add3, dot3, normalize3, scale3, type Vec3 } from '../src/core/math';
-import { homography, poseFromSquare } from '../src/perception/space/marker';
+import { focalFromSquare, hfovFromFocal, homography, poseFromSquare } from '../src/perception/space/marker';
 import { intrinsicsFromFov } from '../src/perception/space/surface';
 
 const k = intrinsicsFromFov(1280, 720, 65);
@@ -37,5 +37,29 @@ describe('poseFromSquare', () => {
     expect(pose.center.z).toBeCloseTo(center.z, 3);
     expect(dot3(pose.normal, normal)).toBeGreaterThan(0.999);
     expect(dot3(pose.xAxis, xAxis)).toBeGreaterThan(0.999);
+  });
+});
+
+describe('focalFromSquare (autocalibración del FOV)', () => {
+  it('recupera la distancia focal de un marcador inclinado', () => {
+    for (const hfov of [60, 78, 90]) {
+      const kk = intrinsicsFromFov(1920, 1080, hfov);
+      const tilt = (50 * Math.PI) / 180;
+      const xAxis = normalize3({ x: 0.97, y: 0, z: 0.24 });
+      const y0 = { x: 0, y: Math.sin(tilt), z: -Math.cos(tilt) };
+      // Ortogonalizar: el marcador es un cuadrado de verdad.
+      const yAxis = normalize3(add3(y0, scale3(xAxis, -dot3(y0, xAxis))));
+      const center = { x: -0.1, y: 0.3, z: 1.4 };
+      const corner = (sx: number, sy: number) => add3(center, add3(scale3(xAxis, sx * 0.05), scale3(yAxis, sy * 0.05)));
+      const px = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)].map((p) => ({ x: kk.fx * (p.x / p.z) + kk.cx, y: kk.fy * (p.y / p.z) + kk.cy }));
+      const f = focalFromSquare(px, kk.cx, kk.cy)!;
+      expect(Math.abs(f - kk.fx) / kk.fx).toBeLessThan(0.01);
+      expect(hfovFromFocal(f, 1920)).toBeCloseTo(hfov, 0);
+    }
+  });
+
+  it('no inventa un valor con el marcador de frente', () => {
+    const px = [{ x: 900, y: 500 }, { x: 1020, y: 500 }, { x: 1020, y: 620 }, { x: 900, y: 620 }];
+    expect(focalFromSquare(px, 960, 540)).toBeNull();
   });
 });
