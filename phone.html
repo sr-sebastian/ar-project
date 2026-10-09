@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>AR · Cámara del celular</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; background: #0b0d12; color: #e8eaf0; display: flex; flex-direction: column; min-height: 100dvh; }
+      video { width: 100%; flex: 1; object-fit: cover; background: #000; min-height: 0; }
+      .panel { padding: 16px; display: grid; gap: 12px; }
+      h1 { font-size: 18px; margin: 0; }
+      #status { margin: 0; color: #aab; font-size: 15px; }
+      .row { display: flex; gap: 8px; }
+      button { flex: 1; font-size: 17px; padding: 14px; border-radius: 12px; border: 0; background: #4f7cff; color: #fff; font-weight: 600; }
+      button.secondary { background: #2a2f3d; }
+      button:disabled { opacity: 0.5; }
+    </style>
+  </head>
+  <body>
+    <video id="preview" autoplay playsinline muted></video>
+    <div class="panel">
+      <h1>📱 Usar este celular como cámara</h1>
+      <p id="status">Tocá "Conectar" y aceptá el permiso de cámara.</p>
+      <div class="row">
+        <button id="start">Conectar</button>
+        <button id="flip" class="secondary" hidden>Cambiar cámara</button>
+      </div>
+    </div>
+    <script type="module" src="/src/phone/phone.ts"></script>
+  </body>
+</html>
