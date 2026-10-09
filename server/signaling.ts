@@ -90,8 +90,23 @@ export function lanAddresses(): string[] {
     .map((i) => i.address);
 }
 
+/**
+ * Node 22.21.0 (y 24.9.x) agregaron `shouldUpgradeCallback` a http.Server pero no a los
+ * servidores HTTP/2 con `allowHTTP1` que usa Vite con HTTPS: cualquier WebSocket (HMR o
+ * señalización) tira "server.shouldUpgradeCallback is not a function" y mata el proceso.
+ * Arreglado en Node 22.22; mientras tanto definimos el callback con su valor por defecto.
+ */
+function patchUpgradeCallback(httpServer: HttpServer | Http2SecureServer) {
+  const server = httpServer as unknown as { shouldUpgradeCallback?: unknown; listenerCount(event: string): number };
+  if (typeof server.shouldUpgradeCallback === 'function') return;
+  server.shouldUpgradeCallback = function (this: typeof server) {
+    return this.listenerCount('upgrade') > 0;
+  };
+}
+
 function attach(httpServer: HttpServer | Http2SecureServer | null) {
   if (!httpServer) return;
+  patchUpgradeCallback(httpServer);
   const signaling = createSignalingServer();
   httpServer.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (req.url?.startsWith(SIGNAL_PATH)) signaling.handleUpgrade(req, socket, head);
