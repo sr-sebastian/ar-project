@@ -142,3 +142,23 @@ export class SwipeDetector {
     return vy > 0 ? 'down' : 'up';
   }
 }
+
+/**
+ * ¿La palma mira hacia la cámara (y no el dorso)?
+ *
+ * Se mira el orden en pantalla de la base del índice y la del meñique respecto de la
+ * muñeca (producto cruz 2D). Ese orden se invierte al dar vuelta la mano, al cambiar de
+ * mano (izquierda/derecha son espejos) y al espejar la imagen; con la mano real conocida y
+ * el espejado, el signo dice de qué lado está la palma. No depende de la rotación de la
+ * mano en el plano de la imagen.
+ */
+export function palmFacesCamera(lm: Vec3[], handedness: 'Left' | 'Right', mirrored: boolean): boolean {
+  const w = lm[HAND.WRIST];
+  const a = { x: lm[HAND.INDEX_MCP].x - w.x, y: lm[HAND.INDEX_MCP].y - w.y };
+  const b = { x: lm[HAND.PINKY_MCP].x - w.x, y: lm[HAND.PINKY_MCP].y - w.y };
+  const cross = a.x * b.y - a.y * b.x;
+  // Imagen cruda, mano derecha con la palma hacia la cámara → cruz negativa.
+  let sign = handedness === 'Right' ? -1 : 1;
+  if (mirrored) sign = -sign;
+  return cross * sign > 0;
+}

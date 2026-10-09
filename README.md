@@ -18,10 +18,11 @@ Corre en el navegador del PC (Chrome o Edge) con TypeScript, MediaPipe, Three.js
 
 ## Control con la mano (sin mouse)
 
-- **Apuntar:** el índice mueve el cursor. Aparece sólo con una mano estable y se suaviza para no temblar.
-- **Elegir:** **pellizcá y mantené** ~0,5 s. El anillo se llena y, si soltás antes, se cancela. Quedarse quieto **no** hace click, así que con las manos en reposo no se elige nada sin querer.
-- **Volver:** palma abierta **en alto** (tercio superior de la imagen) durante 2 s. También funcionan el botón *Menú* y `Esc`.
-- **Objetivo pegajoso:** el botón señalado no se pierde por unos píxeles, y durante el pellizco el cursor queda fijo.
+- **Apuntar:** el cursor sigue el **centro de la palma**, así que podés moverlo con la mano en cualquier postura. Moverse no hace nada.
+- **Elegir:** sobre el botón, **abrí la palma hacia la cámara** y sostenela ~0,6 s mientras se llena el anillo. Tiene que ser una apertura: si llegás con la mano ya abierta, cerrala y volvela a abrir. Con el dorso hacia la cámara no elige.
+- **Puño, pellizco, pulgar arriba y los demás gestos no hacen nada en el menú.**
+- **Volver:** cruzá los **brazos en X** ~1 s. Con el cuerpo a la vista se detectan los antebrazos cruzados; en el modo mesa alcanza con cruzar las dos manos. También funcionan el botón *Menú* y `Esc`.
+- **Objetivo pegajoso:** el botón señalado no se pierde por unos píxeles, y al abrir la mano el cursor queda fijo.
 
 ## Superficies: cómo se ubican el piso y la mesa
 
@@ -82,7 +83,7 @@ src/
   perception/   gestos, expresiones, cuerpo, metric (PnP de traslación → metros), Perception
     space/      marcadores ArUco, calibraciones (piso por cuerpo, mesa por palma),
                 plano en disparidad, worker de profundidad
-  input/        HandCursor (pellizcar y mantener, objetivo pegajoso, volver con la palma en alto)
+  input/        HandCursor (palma abierta hacia la cámara para elegir, volver con brazos en X)
   models/       modelos y texturas procedurales, cargador de GLB opcional
   ui/           íconos (Lucide)
   apps/         fruit-slicer (+ katana), whack-a-mole, blocks (Rapier), debug

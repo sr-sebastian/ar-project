@@ -17,6 +17,8 @@ export interface HandState {
   mpGesture: { name: string; score: number } | null;
   fingers: FingerState;
   pinching: boolean;
+  /** La palma (no el dorso) mira hacia la cámara. */
+  palmFacing: boolean;
   /** Distancia pulgar-índice / tamaño de palma. */
   pinchDistance: number;
   indexTip: Vec2;

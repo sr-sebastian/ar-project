@@ -37,7 +37,6 @@ const rnd = seededRandom(4);
  * - Modo Torre: apilá lo más alto posible; la altura se mide sobre la superficie.
  */
 class BlocksApp implements AppInstance {
-  allowPalmBack = false;
   private ctx!: AppContext;
   private R: Rapier | null = null;
   private world: RAPIER_NS.World | null = null;

@@ -5,23 +5,22 @@ import type { HandState } from '../perception/types';
 const CLICKABLE = 'button:not([disabled]), [data-ar-click], a[href], input[type="checkbox"], select';
 
 /**
- * Cursor controlado con la mano, diseñado para NO producir selecciones accidentales:
+ * Cursor controlado con la mano, pensado para que NADA se active sin querer:
  *
- * - Nada se activa por quedarse quieto (no hay "dwell"): para elegir hay que pellizcar y
- *   SOSTENER el pellizco ~0.45 s. Soltar antes cancela.
- * - Mientras se pellizca, el cursor queda congelado donde empezó el pellizco (el gesto
- *   mueve los dedos y desplazaría el cursor fuera del botón).
- * - El objetivo es "pegajoso": una vez sobre un botón, se mantiene aunque el cursor se
- *   salga unos píxeles del borde (histéresis), así no titila entre tarjetas vecinas.
- * - El cursor sólo aparece con una mano estable (detectada varios frames seguidos y con
- *   dedos confiables), y se suaviza para eliminar el temblor.
- * - Mantener la palma abierta, quieta y LEVANTADA (tercio superior de la imagen) 2 s
- *   dispara "volver" (sólo donde se permite). Así no se dispara con las manos en reposo.
+ * - El cursor sigue el CENTRO DE LA PALMA (estable con cualquier postura de la mano), así
+ *   se puede mover con la mano relajada, cerrada o como sea: moverse no hace nada.
+ * - Para ELEGIR: sobre el botón, ABRIR la palma mirando a la cámara y sostenerla ~0.6 s
+ *   (se llena el anillo). Tiene que ser una apertura: si se llega con la palma ya abierta,
+ *   hay que cerrarla y volver a abrirla. Con el dorso hacia la cámara no elige.
+ * - Puño, pellizco y cualquier otro gesto no hacen nada en el menú.
+ * - Al abrir la mano el cursor se congela (abrir los dedos desplaza el centro de la palma).
+ * - El objetivo es "pegajoso" (histéresis de unos píxeles) para no titilar entre botones.
+ * - Para VOLVER: cruzar los brazos en X ~1 s (lo detecta el shell y llama a `onBack`).
  */
 export class HandCursor {
-  /** Si es false, el cursor no se muestra ni hace clicks (el gesto de volver sigue activo). */
+  /** Si es false, el cursor no se muestra ni elige (volver con la X sigue activo). */
   visible = true;
-  /** Si el gesto de palma abierta para volver está disponible ahora. */
+  /** Si el gesto de volver (brazos en X) está disponible ahora. */
   backEnabled = false;
   /** Posición en píxeles de pantalla, o null si no hay mano. */
   position: Vec2 | null = null;
@@ -33,17 +32,21 @@ export class HandCursor {
   private hovered: HTMLElement | null = null;
   private smoothed: Vec2 | null = null;
   private frozenAt: Vec2 | null = null;
-  private pinchStart = 0;
-  private pinchConsumed = false;
-  private palmStart = 0;
+  /** La palma estaba abierta hacia la cámara en el frame anterior. */
+  private wasOpen = true;
+  /** Momento en que se abrió la palma sobre el objetivo actual (0 = no armado). */
+  private openSince = 0;
+  private consumed = false;
+  private crossSince = 0;
   private cooldownUntil = 0;
   private stableFrames = 0;
+  private openFrames = 0;
 
   constructor(
     private viewport: Viewport,
-    private holdMs = 450,
-    private palmBackMs = 2000,
-    private stickyPx = 28,
+    private holdMs = 600,
+    private crossMs = 1000,
+    private stickyPx = 32,
   ) {
     this.el = document.createElement('div');
     this.el.className = 'hand-cursor';
@@ -59,74 +62,83 @@ export class HandCursor {
     return usable.find((h) => h.handedness === 'Right') ?? usable[0] ?? null;
   }
 
-  update(hands: HandState[], now: number) {
+  /**
+   * @param armsCrossed brazos en X en este frame (gesto de volver).
+   */
+  update(hands: HandState[], armsCrossed: boolean, now: number) {
+    // Volver: brazos en X sostenidos.
+    let back = 0;
+    if (this.backEnabled && armsCrossed && now > this.cooldownUntil) {
+      this.crossSince ||= now;
+      back = (now - this.crossSince) / this.crossMs;
+      if (back >= 1) {
+        this.crossSince = 0;
+        this.cooldownUntil = now + 1500;
+        this.onBack();
+      }
+    } else this.crossSince = 0;
+
     const hand = this.pickHand(hands);
     this.stableFrames = hand ? this.stableFrames + 1 : 0;
     if (!hand || this.stableFrames < 4) {
       this.position = null;
       this.smoothed = null;
       this.frozenAt = null;
-      this.pinchStart = 0;
-      this.palmStart = 0;
+      this.openSince = 0;
+      this.wasOpen = true; // al reaparecer hay que abrir la mano de nuevo
       this.setHovered(null);
-      this.render(0, false);
+      this.render(back, back > 0.05);
       return;
     }
 
-    // Punto de control: punta del índice (o punto medio índice-pulgar al pellizcar).
-    const lm = hand.landmarks;
-    const raw = this.viewport.toScreen(hand.pinching ? { x: (lm[4].x + lm[8].x) / 2, y: (lm[4].y + lm[8].y) / 2 } : hand.indexTip);
+    // Palma abierta hacia la cámara, estable unos frames (filtra parpadeos del clasificador).
+    const openNow = hand.gesture === 'open_palm' && hand.palmFacing;
+    this.openFrames = openNow ? this.openFrames + 1 : 0;
+    const open = this.openFrames >= 2;
+
+    // Posición: centro de la palma, suavizado con zona muerta.
+    const raw = this.viewport.toScreen(hand.palmCenter);
     if (!this.smoothed) this.smoothed = raw;
     else {
       const d = Math.hypot(raw.x - this.smoothed.x, raw.y - this.smoothed.y);
-      // Zona muerta pequeña + suavizado adaptativo (rápido si el movimiento es grande).
       if (d > 2) {
         const a = Math.min(0.75, 0.2 + d / 200);
         this.smoothed = { x: this.smoothed.x + (raw.x - this.smoothed.x) * a, y: this.smoothed.y + (raw.y - this.smoothed.y) * a };
       }
     }
 
-    // Pellizco: congela el cursor y cuenta el tiempo sostenido.
+    // Selección por apertura de palma.
     let progress = 0;
-    if (hand.pinching) {
-      if (!this.pinchStart) {
-        this.pinchStart = now;
-        this.frozenAt = this.smoothed;
-        this.pinchConsumed = false;
-      }
-      if (this.hovered && !this.pinchConsumed && now > this.cooldownUntil) {
-        progress = (now - this.pinchStart) / this.holdMs;
-        if (progress >= 1) {
-          this.pinchConsumed = true;
-          this.activate(now);
-        }
-      }
-    } else {
-      this.pinchStart = 0;
+    if (open && !this.wasOpen) {
+      // Flanco: la mano se acaba de abrir → congelar cursor y armar la selección.
+      this.frozenAt = this.smoothed;
+      this.openSince = now;
+      this.consumed = false;
+    }
+    if (!open) {
+      this.openSince = 0;
       this.frozenAt = null;
     }
+    this.wasOpen = open;
+
     const p = this.frozenAt ?? this.smoothed;
     this.position = p;
-    if (!hand.pinching && this.visible) this.setHovered(this.findTarget(p));
+    if (this.visible && !this.openSince) this.setHovered(this.findTarget(p));
     if (!this.visible) this.setHovered(null);
 
-    // Palma abierta y quieta → volver.
-    let back = 0;
-    if (this.backEnabled && hand.gesture === 'open_palm' && hand.speed < 0.35 && !hand.pinching && hand.palmCenter.y < 0.4) {
-      this.palmStart ||= now;
-      back = (now - this.palmStart) / this.palmBackMs;
-      if (back >= 1 && now > this.cooldownUntil) {
-        this.cooldownUntil = now + 1200;
-        this.palmStart = 0;
-        this.onBack();
+    if (this.visible && this.openSince && this.hovered && !this.consumed && now > this.cooldownUntil) {
+      progress = (now - this.openSince) / this.holdMs;
+      if (progress >= 1) {
+        this.consumed = true;
+        this.activate(now);
       }
-    } else this.palmStart = 0;
+    }
 
     this.el.style.transform = `translate(${p.x}px, ${p.y}px)`;
-    this.el.classList.toggle('pinching', hand.pinching);
-    this.el.classList.toggle('back', back > 0.1);
-    this.label.textContent = back > 0.1 ? 'Volver' : this.hovered && hand.pinching && !this.pinchConsumed ? 'Mantené…' : '';
-    this.render(back > 0.1 ? back : progress, this.visible || back > 0.1);
+    this.el.classList.toggle('selecting', !!this.openSince && !!this.hovered && !this.consumed);
+    this.el.classList.toggle('back', back > 0.05);
+    this.label.textContent = back > 0.05 ? 'Volver' : this.openSince && this.hovered && !this.consumed ? 'Mantené la palma…' : '';
+    this.render(back > 0.05 ? back : progress, this.visible || back > 0.05);
   }
 
   /** Busca el elemento clickeable bajo el cursor, manteniendo el actual si sigue cerca. */
@@ -152,7 +164,7 @@ export class HandCursor {
   private activate(now: number) {
     const el = this.hovered;
     if (!el) return;
-    this.cooldownUntil = now + 600;
+    this.cooldownUntil = now + 700;
     el.classList.add('ar-pressed');
     setTimeout(() => el.classList.remove('ar-pressed'), 220);
     el.click();
@@ -160,7 +172,8 @@ export class HandCursor {
 
   private render(progress: number, show: boolean) {
     this.ring.style.strokeDashoffset = String(119.4 * (1 - Math.min(1, Math.max(0, progress))));
-    this.el.style.opacity = show && this.position ? '1' : '0';
+    this.el.style.opacity = show && (this.position || progress > 0) ? '1' : '0';
+    if (!this.position && progress > 0) this.el.style.transform = `translate(${window.innerWidth / 2}px, ${window.innerHeight / 2}px)`;
     this.el.classList.toggle('over-target', !!this.hovered);
   }
 

@@ -50,11 +50,6 @@ class WhackAMoleApp implements AppInstance {
   private offEvents: (() => void)[] = [];
   private now = 0;
 
-  get allowPalmBack() {
-    // Apoyar la mano abierta sobre la mesa es parte del juego: sólo sale fuera de la partida.
-    return this.game.state !== 'playing';
-  }
-
   mount(ctx: AppContext) {
     this.ctx = ctx;
     void preloadModel('mole');

@@ -35,8 +35,8 @@ export interface AppInstance {
   /** `frame` es null mientras no haya tracking (cámara cargando, sin persona…). */
   update(frame: PerceptionFrame | null, dt: number): void;
   unmount(): void;
-  /** Si es false, la palma abierta no saca de la app (p. ej. si el juego usa la palma). */
-  allowPalmBack?: boolean;
+  /** Si es false, cruzar los brazos en X no saca de la app. */
+  allowBack?: boolean;
 }
 
 export interface AppDefinition {

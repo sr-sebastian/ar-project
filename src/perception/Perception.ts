@@ -4,7 +4,7 @@ import { OneEuroFilter } from '../tracking/OneEuroFilter';
 import type { Handedness, Landmark, TrackingFrame } from '../tracking/types';
 import { computeBodyMetrics, PostureTracker } from './body';
 import { computeExpressions, expressionLevels, headPoseFromMatrix, type ExpressionName } from './expressions';
-import { classifyGesture, fingerStates, GestureStabilizer, PinchDetector, pinchDistance, SwipeDetector } from './gestures';
+import { classifyGesture, fingerStates, GestureStabilizer, palmFacesCamera, PinchDetector, pinchDistance, SwipeDetector } from './gestures';
 import { HAND, POSE } from './landmarks';
 import { handPlaneNormal, palmCenter, solveTranslation, toCamera } from './metric';
 import { FloorFromBody, TableFromPalm } from './space/calibration';
@@ -163,7 +163,7 @@ export class Perception {
       this.bodyTranslation.reset();
     }
 
-    const hands = frame.hands.map((h) => this.updateHand(h, t, dt, aspect, k, body?.camera ?? null));
+    const hands = frame.hands.map((h) => this.updateHand(h, t, dt, aspect, k, body?.camera ?? null, frame.mirrored));
     for (const side of ['Left', 'Right'] as const) {
       if (!frame.hands.some((h) => h.handedness === side)) this.releaseHand(side);
     }
@@ -202,7 +202,7 @@ export class Perception {
     };
   }
 
-  private updateHand(h: TrackingFrame['hands'][number], t: number, dt: number, aspect: number, k: Intrinsics, bodyCam: Vec3[] | null): HandState {
+  private updateHand(h: TrackingFrame['hands'][number], t: number, dt: number, aspect: number, k: Intrinsics, bodyCam: Vec3[] | null, mirrored: boolean): HandState {
     const mem = this.hands[h.handedness];
     const lm = h.landmarks;
     const wasPinching = mem.pinch.active;
@@ -265,6 +265,7 @@ export class Perception {
       mpGesture: h.mpGesture,
       fingers: fingerStates(lm),
       pinching,
+      palmFacing: !fromPose && palmFacesCamera(lm, h.handedness, mirrored),
       pinchDistance: pinchDistance(lm),
       indexTip: tip,
       prevIndexTip: prevTip,

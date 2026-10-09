@@ -6,6 +6,7 @@ import { PhoneWebRTCSource, phoneUrl, type PhoneStatus } from '../camera/PhoneWe
 import { randomRoom } from '../camera/signaling';
 import { HandCursor } from '../input/HandCursor';
 import { HAND_CONNECTIONS } from '../perception/landmarks';
+import { armsCrossed } from '../perception/navigation';
 import { Perception } from '../perception/Perception';
 import { DepthEstimator } from '../perception/space/DepthEstimator';
 import { MARKER_IDS, MarkerTracker } from '../perception/space/marker';
@@ -257,9 +258,9 @@ export class App {
             .join('')}
         </div>
         <footer class="how-to">
-          <span>${icon('hand', 18)} Apuntá con el índice</span>
-          <span>${icon('sparkles', 18)} Pellizcá y <b>mantené</b> para elegir</span>
-          <span>${icon('back', 18)} Palma abierta en alto 2 s = volver</span>
+          <span>${icon('hand', 18)} Mové la mano para apuntar</span>
+          <span>${icon('sparkles', 18)} <b>Abrí la palma</b> hacia la cámara para elegir</span>
+          <span>${icon('close', 18)} Brazos cruzados en <b>X</b> = volver</span>
           <a href="marcador.html" target="_blank" rel="noopener">${icon('printer', 18)} Imprimir marcadores</a>
         </footer>
       </section>`;
@@ -523,8 +524,8 @@ export class App {
       if (this.depth.running) this.depth.update(this.video, this.calibration.mirror);
       this.scene.estimateLighting(this.video);
       this.occluders.update(this.frame);
-      this.cursor.backEnabled = !!this.current && this.current.instance.allowPalmBack !== false;
-      this.cursor.update(this.frame?.hands ?? [], nowMs);
+      this.cursor.backEnabled = !!this.current && this.current.instance.allowBack !== false;
+      this.cursor.update(this.frame?.hands ?? [], this.frame ? armsCrossed(this.frame) : false, nowMs);
 
       if (this.current) {
         this.current.instance.update(this.frame, dt);

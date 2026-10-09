@@ -39,9 +39,6 @@ const rnd = seededRandom(99);
  * las manos las tapan cuando corresponde y proyectan sombra sobre el piso.
  */
 class FruitSlicerApp implements AppInstance {
-  get allowPalmBack() {
-    return this.game?.state !== 'playing';
-  }
   private ctx!: AppContext;
   private game!: FruitSlicerGame;
   private meshes = new Map<number, THREE.Object3D>();
@@ -212,7 +209,7 @@ class FruitSlicerApp implements AppInstance {
         this.showMessage(
           `${icon('bomb', 26)} Fin del juego`,
           `<b>${e.score}</b> puntos`,
-          'Pulgar arriba para reintentar · sonreí para guardar el puntaje · palma abierta para salir',
+          'Pulgar arriba para reintentar · sonreí para guardar el puntaje · brazos en X para salir',
           [
             { label: `${icon('reset', 18)} Reintentar`, action: () => this.start(), primary: true },
             { label: `${icon('trophy', 18)} Guardar`, action: () => !this.saved && this.saveScore() },
