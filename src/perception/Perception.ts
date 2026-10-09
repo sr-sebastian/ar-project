@@ -1,21 +1,41 @@
 import { EventBus } from '../core/EventBus';
-import { mid2, type Vec2, type Vec3 } from '../core/math';
-import type { Handedness, TrackingFrame } from '../tracking/types';
+import { add3, dot3, mid2, scale3, sub3, type Vec2, type Vec3 } from '../core/math';
+import { OneEuroFilter } from '../tracking/OneEuroFilter';
+import type { Handedness, Landmark, TrackingFrame } from '../tracking/types';
 import { computeBodyMetrics, PostureTracker } from './body';
 import { computeExpressions, expressionLevels, headPoseFromMatrix, type ExpressionName } from './expressions';
 import { classifyGesture, fingerStates, GestureStabilizer, PinchDetector, pinchDistance, SwipeDetector } from './gestures';
-import { HAND } from './landmarks';
+import { HAND, POSE } from './landmarks';
+import { handPlaneNormal, palmCenter, solveTranslation, toCamera } from './metric';
+import { FloorFromBody, TableFromPalm } from './space/calibration';
 import type { DepthEstimator } from './space/DepthEstimator';
+import { MARKER_IDS, type MarkerPose } from './space/marker';
 import {
-  blendPlanes,
   defaultSurface,
-  estimateSurface,
+  fitDisparityPlane,
   intrinsicsFromFov,
+  normalFromDisparityFit,
+  planeThrough,
+  projectOnPlane,
+  rayPlane,
+  regionOf,
   type DepthMap,
+  type Intrinsics,
   type Plane,
   type SurfaceKind,
 } from './space/surface';
-import type { HandState, PerceptionEvents, PerceptionFrame, SpaceState } from './types';
+import type { HandState, PerceptionEvents, PerceptionFrame, SpaceState, SurfaceSource } from './types';
+
+/** Filtro One-Euro para un vector 3D (traslaciones métricas). */
+class Vec3Filter {
+  private f = [new OneEuroFilter(1.2, 0.3), new OneEuroFilter(1.2, 0.3), new OneEuroFilter(0.8, 0.2)];
+  filter(v: Vec3, t: number): Vec3 {
+    return { x: this.f[0].filter(v.x, t), y: this.f[1].filter(v.y, t), z: this.f[2].filter(v.z, t) };
+  }
+  reset() {
+    this.f.forEach((f) => f.reset());
+  }
+}
 
 interface HandMemory {
   pinch: PinchDetector;
@@ -25,6 +45,9 @@ interface HandMemory {
   prevPalm: Vec2 | null;
   velocity: Vec2;
   tipVelocity: Vec2;
+  translation: Vec3Filter;
+  prevPalm3: Vec3 | null;
+  velocity3: Vec3;
 }
 
 const newHandMemory = (): HandMemory => ({
@@ -35,6 +58,9 @@ const newHandMemory = (): HandMemory => ({
   prevPalm: null,
   velocity: { x: 0, y: 0 },
   tipVelocity: { x: 0, y: 0 },
+  translation: new Vec3Filter(),
+  prevPalm3: null,
+  velocity3: { x: 0, y: 0, z: 0 },
 });
 
 export interface SpaceConfig {
@@ -45,19 +71,27 @@ export interface SpaceConfig {
 
 /**
  * Convierte frames crudos del tracker en un estado semántico (gestos, expresiones,
- * postura, superficie) y emite eventos de flanco ("empezó un pinch", "sonrió", …).
+ * postura, posiciones métricas, superficie) y emite eventos de flanco ("empezó un pinch",
+ * "sonrió", "se calibró la mesa"…).
  */
 export class Perception {
   readonly events = new EventBus<PerceptionEvents>();
   private hands: Record<Handedness, HandMemory> = { Left: newHandMemory(), Right: newHandMemory() };
   private posture = new PostureTracker();
+  private bodyTranslation = new Vec3Filter();
   private expressionActive = new Map<ExpressionName, boolean>();
   private lastT = 0;
+  // Superficies
+  private floor = new FloorFromBody();
+  private table = new TableFromPalm();
   private lastDepth: DepthMap | null = null;
-  private surface: Plane | null = null;
-  private surfaceConfidence = 0;
-  private surfaceFromDepth = false;
-  /** Gravedad en coordenadas de cámara enviada por el celular (si aplica). */
+  private depthNormal: Vec3 | null = null;
+  private depthRegion: { u: number; v: number; spread: number } | null = null;
+  private announced: SurfaceSource = 'assumed';
+  /** Último marcador visto para el modo actual (queda fijo aunque se tape). */
+  private marker: MarkerPose | null = null;
+  private markerVisible: MarkerPose | null = null;
+  /** Vertical (opuesta a la gravedad) en coordenadas de cámara enviada por el celular. */
   up: Vec3 | null = null;
 
   constructor(
@@ -66,16 +100,43 @@ export class Perception {
   ) {}
 
   setSpaceConfig(cfg: SpaceConfig) {
-    const kindChanged = cfg.kind !== this.space.kind;
+    const changed = cfg.kind !== this.space.kind || cfg.hfov !== this.space.hfov;
     this.space = cfg;
-    if (kindChanged) this.resetSurface();
+    if (changed) this.recalibrate();
   }
 
-  resetSurface() {
-    this.surface = null;
-    this.surfaceFromDepth = false;
-    this.surfaceConfidence = 0;
+  /** Olvida la superficie medida (por ejemplo, si se movió la cámara). */
+  recalibrate() {
+    this.floor.reset();
+    this.table.reset();
+    this.depthNormal = null;
+    this.depthRegion = null;
     this.lastDepth = null;
+    this.announced = 'assumed';
+    this.marker = null;
+  }
+
+  /** Marcadores detectados en el último análisis (null = no se analizó este frame). */
+  setMarkers(poses: MarkerPose[] | null) {
+    if (!poses) return;
+    const wanted = MARKER_IDS[this.space.kind];
+    const m = poses.find((p) => p.id === wanted) ?? null;
+    this.markerVisible = m;
+    if (!m) return;
+    // Suavizado: mezcla con la pose anterior si es coherente.
+    if (this.marker && dot3(this.marker.normal, m.normal) > 0.9) {
+      const b = (a: Vec3, c: Vec3, t: number) => add3(scale3(a, 1 - t), scale3(c, t));
+      this.marker = {
+        ...m,
+        center: b(this.marker.center, m.center, 0.35),
+        normal: blend(this.marker.normal, m.normal, 0.35),
+        xAxis: blend(this.marker.xAxis, m.xAxis, 0.35),
+      };
+    } else this.marker = m;
+  }
+
+  get tableCalibrated() {
+    return !!this.table.plane;
   }
 
   update(frame: TrackingFrame): PerceptionFrame {
@@ -83,8 +144,26 @@ export class Perception {
     const dt = this.lastT ? Math.min(0.1, Math.max(1e-3, t - this.lastT)) : 1 / 30;
     this.lastT = t;
     const aspect = frame.videoWidth / frame.videoHeight;
+    const k = intrinsicsFromFov(frame.videoWidth, frame.videoHeight, this.space.hfov);
 
-    const hands = frame.hands.map((h) => this.updateHand(h, t, dt, aspect));
+    let body: PerceptionFrame['body'] = null;
+    if (frame.pose) {
+      const posture = this.posture.update(frame.pose.landmarks, t);
+      const T = solveTranslation(frame.pose.landmarks, frame.pose.world, k, 0.6);
+      body = {
+        landmarks: frame.pose.landmarks,
+        world: frame.pose.world,
+        metrics: computeBodyMetrics(frame.pose.landmarks, frame.pose.world),
+        crouching: posture.crouching,
+        jumping: posture.jumping,
+        camera: T ? toCamera(frame.pose.world, this.bodyTranslation.filter(T, t)) : null,
+      };
+    } else {
+      this.posture.reset();
+      this.bodyTranslation.reset();
+    }
+
+    const hands = frame.hands.map((h) => this.updateHand(h, t, dt, aspect, k, body?.camera ?? null));
     for (const side of ['Left', 'Right'] as const) {
       if (!frame.hands.some((h) => h.handedness === side)) this.releaseHand(side);
     }
@@ -110,18 +189,6 @@ export class Perception {
       };
     }
 
-    let body: PerceptionFrame['body'] = null;
-    if (frame.pose) {
-      const posture = this.posture.update(frame.pose.landmarks, t);
-      body = {
-        landmarks: frame.pose.landmarks,
-        world: frame.pose.world,
-        metrics: computeBodyMetrics(frame.pose.landmarks, frame.pose.world),
-        crouching: posture.crouching,
-        jumping: posture.jumping,
-      };
-    } else this.posture.reset();
-
     return {
       t,
       dt,
@@ -130,17 +197,19 @@ export class Perception {
       hands,
       face,
       body,
-      space: this.updateSpace(frame),
+      space: this.updateSpace(k, body, hands, t),
       timings: frame.timings,
     };
   }
 
-  private updateHand(h: TrackingFrame['hands'][number], t: number, dt: number, aspect: number): HandState {
+  private updateHand(h: TrackingFrame['hands'][number], t: number, dt: number, aspect: number, k: Intrinsics, bodyCam: Vec3[] | null): HandState {
     const mem = this.hands[h.handedness];
     const lm = h.landmarks;
     const wasPinching = mem.pinch.active;
-    const pinching = mem.pinch.update(lm);
-    const raw = classifyGesture(lm, pinching);
+    // La mano aproximada desde la pose no tiene dedos confiables: sin pinch ni gestos finos.
+    const fromPose = h.source === 'pose';
+    const pinching = fromPose ? false : mem.pinch.update(lm);
+    const raw = fromPose ? 'none' : classifyGesture(lm, pinching);
     const previous = mem.stabilizer.current;
     const gesture = mem.stabilizer.update(raw);
 
@@ -148,18 +217,40 @@ export class Perception {
     const palm = mid2(lm[HAND.WRIST], lm[HAND.MIDDLE_MCP]);
     const prevTip = mem.prevTip ?? tip;
     const prevPalm = mem.prevPalm ?? palm;
-    const k = 0.5; // suavizado exponencial de la velocidad
+    const s = 0.5; // suavizado exponencial de la velocidad
     mem.velocity = {
-      x: mem.velocity.x * (1 - k) + (((palm.x - prevPalm.x) * aspect) / dt) * k,
-      y: mem.velocity.y * (1 - k) + ((palm.y - prevPalm.y) / dt) * k,
+      x: mem.velocity.x * (1 - s) + (((palm.x - prevPalm.x) * aspect) / dt) * s,
+      y: mem.velocity.y * (1 - s) + ((palm.y - prevPalm.y) / dt) * s,
     };
     mem.tipVelocity = {
-      x: mem.tipVelocity.x * (1 - k) + (((tip.x - prevTip.x) * aspect) / dt) * k,
-      y: mem.tipVelocity.y * (1 - k) + ((tip.y - prevTip.y) / dt) * k,
+      x: mem.tipVelocity.x * (1 - s) + (((tip.x - prevTip.x) * aspect) / dt) * s,
+      y: mem.tipVelocity.y * (1 - s) + ((tip.y - prevTip.y) / dt) * s,
     };
     mem.prevTip = tip;
     mem.prevPalm = palm;
     const swipe = mem.swipe.update(mem.velocity.x, mem.velocity.y, t);
+
+    // Posición métrica: traslación de los world landmarks de la mano hasta la cámara.
+    let camera: Vec3[] | null = null;
+    if (h.world.length === lm.length) {
+      const T = solveTranslation(lm, h.world, k, 0);
+      if (T) camera = toCamera(h.world, mem.translation.filter(T, t));
+    }
+    // De lejos, la distancia por el tamaño de la mano es ruidosa: si hay esqueleto, anclamos
+    // la muñeca de la mano a la muñeca del cuerpo (más estable y coherente con el resto).
+    const bodyWrist = bodyCam?.[h.handedness === 'Left' ? POSE.LEFT_WRIST : POSE.RIGHT_WRIST];
+    if (camera && bodyWrist && (h.source !== 'full' || camera[0].z > 1.5)) {
+      const off = sub3(bodyWrist, camera[0]);
+      camera = camera.map((p) => add3(p, off));
+    }
+    const palm3 = camera ? palmCenter(camera) : null;
+    if (palm3) {
+      const v = mem.prevPalm3 ? scale3(sub3(palm3, mem.prevPalm3), 1 / dt) : { x: 0, y: 0, z: 0 };
+      mem.velocity3 = add3(scale3(mem.velocity3, 0.6), scale3(v, 0.4));
+      mem.prevPalm3 = palm3;
+    } else {
+      mem.prevPalm3 = null;
+    }
 
     if (gesture !== previous) this.events.emit('gesture', { hand: h.handedness, gesture, previous });
     if (pinching !== wasPinching) this.events.emit('pinch', { hand: h.handedness, down: pinching, at: mid2(lm[HAND.THUMB_TIP], lm[HAND.INDEX_TIP]) });
@@ -167,6 +258,7 @@ export class Perception {
 
     return {
       handedness: h.handedness,
+      source: h.source,
       landmarks: lm,
       world: h.world,
       gesture,
@@ -182,6 +274,10 @@ export class Perception {
       tipVelocity: mem.tipVelocity,
       speed: Math.hypot(mem.velocity.x, mem.velocity.y),
       swipe,
+      camera,
+      palm3,
+      normal3: camera && !fromPose ? handPlaneNormal(camera) : null,
+      velocity3: mem.velocity3,
     };
   }
 
@@ -192,34 +288,114 @@ export class Perception {
     this.hands[side] = newHandMemory();
   }
 
-  private updateSpace(frame: TrackingFrame): SpaceState {
-    const map = this.depth.latest;
-    const w = map?.width ?? frame.videoWidth;
-    const h = map?.height ?? frame.videoHeight;
-    const intrinsics = intrinsicsFromFov(w, h, this.space.hfov);
+  private updateSpace(k: Intrinsics, body: PerceptionFrame['body'], hands: HandState[], t: number): SpaceState {
+    const kind = this.space.kind;
+    let surface: Plane | null = null;
+    let source: SurfaceSource = 'assumed';
 
+    // Mapa de profundidad nuevo → plano dominante en disparidad (orientación + región).
+    const map = this.depth.latest;
     if (map && map !== this.lastDepth) {
       this.lastDepth = map;
-      const est = estimateSurface(map, intrinsics, this.space.kind, this.up ?? undefined);
-      if (est && est.confidence > 0.25) {
-        // Suavizado temporal: los mapas de profundidad relativos fluctúan entre frames.
-        this.surface = this.surface && this.surfaceFromDepth ? blendPlanes(this.surface, est.plane, 0.3) : est.plane;
-        this.surfaceFromDepth = true;
-        this.surfaceConfidence = this.surfaceConfidence * 0.7 + est.confidence * 0.3;
+      this.fitDepth(map);
+    }
+    if (!this.depth.running) {
+      this.depthNormal = null;
+      this.depthRegion = null;
+    }
+
+    if (this.marker) {
+      surface = planeThrough(this.marker.normal, this.marker.center);
+      source = 'marker';
+    } else if (kind === 'floor') {
+      if (body?.camera) {
+        const vis = body.landmarks.map((l: Landmark) => l.visibility ?? 0);
+        this.floor.update(body.camera, vis, this.up);
+      }
+      if (this.floor.plane) {
+        surface = this.floor.plane;
+        source = 'body';
+      }
+    } else {
+      // Mesa: mano abierta, plana y quieta → calibración.
+      if (!this.table.plane) {
+        const hand = hands.find((h) => h.source !== 'pose' && h.gesture === 'open_palm' && h.palm3 && h.normal3);
+        const sample = hand
+          ? { center: hand.palm3!, normal: hand.normal3!, speed: Math.hypot(hand.velocity3.x, hand.velocity3.y, hand.velocity3.z), flat: true }
+          : null;
+        this.table.update(sample, t);
+      }
+      if (this.table.plane) {
+        surface = this.table.plane;
+        source = 'hand';
+      } else if (this.depthNormal) {
+        // Sin escala métrica: anclamos el plano a 0.6 m sobre el centro de la región.
+        const r = this.depthRegion ?? { u: 0.5, v: 0.65, spread: 0.2 };
+        const dir = { x: (r.u * k.width - k.cx) / k.fx, y: (r.v * k.height - k.cy) / k.fy, z: 1 };
+        surface = planeThrough(this.depthNormal, scale3(dir, 0.6));
+        source = 'depth';
       }
     }
-    if (!this.depth.running && this.surfaceFromDepth) this.resetSurface();
 
-    const assumed = defaultSurface(this.space.kind, intrinsics, this.space.tableTilt);
+    const plane = surface ?? defaultSurface(kind, k, this.space.tableTilt);
+    if (source !== this.announced) {
+      this.announced = source;
+      this.events.emit('surface', { kind, source });
+    }
+
+    // Centro de la zona de juego.
+    let center: Vec3 | null = null;
+    let extent = kind === 'floor' ? 1.2 : 0.3;
+    if (this.marker) {
+      center = this.marker.center;
+    } else if (kind === 'floor' && body?.camera) {
+      const hips = body.camera[POSE.LEFT_HIP] && body.camera[POSE.RIGHT_HIP] ? scale3(add3(body.camera[POSE.LEFT_HIP], body.camera[POSE.RIGHT_HIP]), 0.5) : null;
+      if (hips) center = projectOnPlane(plane, hips);
+    } else if (kind === 'table') {
+      if (this.depthRegion) {
+        center = rayPlane(plane, k, this.depthRegion.u, this.depthRegion.v);
+        if (center) extent = Math.max(0.15, Math.min(0.6, this.depthRegion.spread * 2 * center.z));
+      }
+    }
+    center ??= rayPlane(plane, k, 0.5, kind === 'floor' ? 0.85 : 0.65) ?? projectOnPlane(plane, { x: 0, y: 0, z: kind === 'floor' ? 2.5 : 0.6 });
+
     return {
-      kind: this.space.kind,
+      kind,
+      intrinsics: k,
       depthStatus: this.depth.status,
       depth: map,
-      surface: this.surfaceFromDepth && this.surface ? this.surface : assumed,
-      surfaceSource: this.surfaceFromDepth ? 'depth' : 'assumed',
-      surfaceConfidence: this.surfaceFromDepth ? this.surfaceConfidence : 0,
-      intrinsics,
+      surface: plane,
+      surfaceSource: source,
+      center,
+      extent,
+      calibrationProgress: this.table.progress,
+      axis: this.marker?.xAxis ?? null,
+      marker: this.markerVisible,
       up: this.up,
     };
   }
+
+  private fitDepth(map: DepthMap) {
+    const kd = intrinsicsFromFov(map.width, map.height, this.space.hfov);
+    const table = this.space.kind === 'table';
+    const fit = fitDisparityPlane(map, {
+      region: table ? [0.3, 1] : [0.55, 1],
+      accept: (f) => {
+        const n = normalFromDisparityFit(f, kd);
+        // Superficies "horizontales" (miran hacia arriba en la imagen), no paredes.
+        return table ? n.y < -0.25 : n.y < -0.6;
+      },
+    });
+    if (!fit || fit.inlierRatio < 0.25) return;
+    const n = normalFromDisparityFit(fit, kd);
+    this.depthNormal = this.depthNormal && dot3(this.depthNormal, n) > 0.8 ? blend(this.depthNormal, n, 0.3) : n;
+    const r = regionOf(fit, map);
+    if (r) this.depthRegion = { u: r.u, v: r.v, spread: Math.max(r.spreadU, r.spreadV) };
+  }
+}
+
+function blend(a: Vec3, b: Vec3, t: number): Vec3 {
+  const v = add3(scale3(a, 1 - t), scale3(b, t));
+  const l = Math.hypot(v.x, v.y, v.z) || 1;
+  return { x: v.x / l, y: v.y / l, z: v.z / l };
 }

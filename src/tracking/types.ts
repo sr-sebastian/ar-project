@@ -23,6 +23,11 @@ export interface RawHand {
   score: number;
   /** Gesto del clasificador de MediaPipe (Closed_Fist, Open_Palm, Pointing_Up, Thumb_Up, Victory, ILoveYou…). */
   mpGesture: { name: string; score: number } | null;
+  /**
+   * De dónde salió: detector del frame completo, recorte ampliado guiado por la pose (manos
+   * lejanas) o aproximación con los puntos de mano de la pose (sin dedos confiables).
+   */
+  source: 'full' | 'crop' | 'pose';
 }
 
 export interface RawFace {

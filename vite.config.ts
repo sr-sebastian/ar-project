@@ -20,6 +20,7 @@ export default defineConfig({
       input: {
         main: resolve(import.meta.dirname, 'index.html'),
         phone: resolve(import.meta.dirname, 'phone.html'),
+        marcador: resolve(import.meta.dirname, 'marcador.html'),
       },
     },
   },

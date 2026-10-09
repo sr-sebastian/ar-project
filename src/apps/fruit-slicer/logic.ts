@@ -26,8 +26,42 @@ export interface Blade {
   speed: number;
 }
 
+/** Barrido de una hoja (katana) entre dos frames: base y punta antes y ahora. */
+export interface Sweep {
+  prevBase: Vec2;
+  prevTip: Vec2;
+  base: Vec2;
+  tip: Vec2;
+  /** Velocidad de la punta (alturas/s). */
+  speed: number;
+}
+
+const cross2 = (o: Vec2, a: Vec2, b: Vec2) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+function pointInTriangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) {
+  const d1 = cross2(a, b, p);
+  const d2 = cross2(b, c, p);
+  const d3 = cross2(c, a, p);
+  const neg = d1 < 0 || d2 < 0 || d3 < 0;
+  const pos = d1 > 0 || d2 > 0 || d3 > 0;
+  return !(neg && pos);
+}
+
+/**
+ * ¿El área barrida por la hoja (cuadrilátero base→punta entre dos frames) toca el círculo?
+ * Se parte en dos triángulos y se chequean también los bordes contra el radio.
+ */
+export function bladeSweepHits(s: Pick<Sweep, 'prevBase' | 'prevTip' | 'base' | 'tip'>, center: Vec2, radius: number): boolean {
+  const { prevBase: b0, prevTip: t0, base: b1, tip: t1 } = s;
+  if (pointInTriangle(center, b0, t0, t1) || pointInTriangle(center, b0, t1, b1)) return true;
+  const edges: [Vec2, Vec2][] = [[b0, t0], [t0, t1], [t1, b1], [b1, b0], [b1, t1]];
+  return edges.some(([a, b]) => segmentPointDistance(a, b, center) <= radius);
+}
+
 export interface GameInput {
   blades: Blade[];
+  /** Hojas de katana (cortan con toda su longitud). */
+  sweeps?: Sweep[];
   /** Cabeza del jugador: las bombas que la tocan explotan. */
   head: Vec2 | null;
 }
@@ -123,7 +157,9 @@ export class FruitSlicerGame {
       this.integrate(f, dt);
       if (f.sliced || f.dead) continue;
 
-      for (const blade of input.blades) {
+      const hitBySweep = (input.sweeps ?? []).some((s) => s.speed >= MIN_SLICE_SPEED && bladeSweepHits(s, f, f.r));
+      const cutters = hitBySweep ? [{ from: f, to: f, speed: Infinity }] : input.blades;
+      for (const blade of cutters) {
         if (blade.speed < MIN_SLICE_SPEED) continue;
         if (segmentPointDistance(blade.from, blade.to, f) > f.r) continue;
         f.sliced = true;

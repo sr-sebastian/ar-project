@@ -24,7 +24,7 @@ async function openCamera() {
   stream?.getTracks().forEach((t) => t.stop());
   stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
-    video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+    video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
   });
   preview.srcObject = stream;
   preview.style.transform = facing === 'user' ? 'scaleX(-1)' : '';

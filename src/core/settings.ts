@@ -12,11 +12,15 @@ export interface CameraCalibration {
 export interface Settings {
   mode: ModeId;
   cameraId: string;
-  poseModel: 'lite' | 'full';
+  poseModel: 'lite' | 'full' | 'heavy';
   smoothing: boolean;
   /** Profundidad monocular (descarga ~25–100 MB la primera vez). */
   depthEnabled: boolean;
   showCursor: boolean;
+  /** Lado del cuadrado negro de los marcadores impresos (m). */
+  markerSizes: { table: number; floor: number };
+  /** Muestra los oclusores (manos/cuerpo) en color. */
+  debugOcclusion: boolean;
   calibrations: Record<string, CameraCalibration>;
 }
 
@@ -31,6 +35,8 @@ const DEFAULTS: Settings = {
   smoothing: true,
   depthEnabled: false,
   showCursor: true,
+  markerSizes: { table: 0.1, floor: 0.18 },
+  debugOcclusion: false,
   calibrations: {},
 };
 

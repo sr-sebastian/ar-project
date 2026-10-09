@@ -63,15 +63,12 @@ async function infer(id: number, bitmap: ImageBitmap) {
   const height = dims[dims.length - 2];
   const width = dims[dims.length - 1];
   const raw = tensor.data as Float32Array;
-  let min = Infinity;
-  let max = -Infinity;
-  for (let i = 0; i < raw.length; i++) {
-    if (raw[i] < min) min = raw[i];
-    if (raw[i] > max) max = raw[i];
-  }
-  const range = max - min || 1;
+  // Sólo se divide por el máximo (sin restar el mínimo): así la disparidad 0 sigue
+  // significando "infinito", que es lo que asume la estimación de planos en disparidad.
+  let max = 0;
+  for (let i = 0; i < raw.length; i++) if (raw[i] > max) max = raw[i];
   const data = new Float32Array(raw.length);
-  for (let i = 0; i < raw.length; i++) data[i] = (raw[i] - min) / range;
+  for (let i = 0; i < raw.length; i++) data[i] = Math.max(0, raw[i]) / (max || 1);
   post({ type: 'result', id, width, height, data, ms: performance.now() - start }, [data.buffer]);
 }
 

@@ -2,21 +2,23 @@ import * as THREE from 'three';
 import { SceneManager } from '../../core/SceneManager';
 import { HAND_CONNECTIONS, POSE_CONNECTIONS } from '../../perception/landmarks';
 import { depthToPoints } from '../../perception/space/surface';
+import { icon } from '../../ui/icons';
 import type { PerceptionFrame } from '../../perception/types';
 import { makeSurfaceGrid, SurfaceAnchor } from '../shared/SurfaceAnchor';
 import type { AppContext, AppDefinition, AppInstance } from '../types';
 
 const GESTURE_LABEL: Record<string, string> = {
   none: '—',
-  pinch: '🤏 pinch',
-  fist: '✊ puño',
-  open_palm: '🖐 palma',
-  point: '☝️ apuntar',
-  victory: '✌️ victoria',
-  thumbs_up: '👍',
-  thumbs_down: '👎',
-  rock: '🤘',
+  pinch: 'pinch',
+  fist: 'puño',
+  open_palm: 'palma',
+  point: 'apuntar',
+  victory: 'victoria',
+  thumbs_up: 'pulgar arriba',
+  thumbs_down: 'pulgar abajo',
+  rock: 'rock',
 };
+const SOURCE_LABEL = { full: '', crop: ' (lejos)', pose: ' (aprox.)' } as const;
 
 /** Visor de todo lo que detecta el sistema: esqueleto, manos, cara, expresiones y espacio. */
 class DebugApp implements AppInstance {
@@ -26,6 +28,7 @@ class DebugApp implements AppInstance {
   private anchor!: SurfaceAnchor;
   private cloud: THREE.Points | null = null;
   private showCloud = false;
+  private occlusion = false;
   private lastDepth: unknown = null;
   private logLines: string[] = [];
   private offEvents: (() => void)[] = [];
@@ -35,8 +38,9 @@ class DebugApp implements AppInstance {
     ctx.ui.innerHTML = `
       <div class="debug-panel">
         <div class="debug-actions">
-          <button data-act="depth">Espacio 3D: <b>${ctx.depthEnabled ? 'ON' : 'OFF'}</b></button>
-          <button data-act="cloud">Nube de puntos</button>
+          <button data-act="depth">${icon('layers', 16)} Profundidad: <b>${ctx.depthEnabled ? 'ON' : 'OFF'}</b></button>
+          <button data-act="cloud">${icon('sparkles', 16)} Nube</button>
+          <button data-act="occ">${icon('hand', 16)} Oclusión</button>
         </div>
         <div class="debug-body"></div>
         <canvas class="depth-thumb" hidden></canvas>
@@ -48,13 +52,23 @@ class DebugApp implements AppInstance {
       ctx.setDepth(!ctx.depthEnabled);
       (e.currentTarget as HTMLElement).querySelector('b')!.textContent = ctx.depthEnabled ? 'ON' : 'OFF';
     };
+    ctx.ui.querySelector<HTMLButtonElement>('[data-act="occ"]')!.onclick = (e) => {
+      this.occlusion = !this.occlusion;
+      ctx.setOcclusion({ hands: this.occlusion, body: this.occlusion });
+      (e.currentTarget as HTMLElement).classList.toggle('active', this.occlusion);
+    };
     ctx.ui.querySelector<HTMLButtonElement>('[data-act="cloud"]')!.onclick = () => {
       this.showCloud = !this.showCloud;
       if (this.cloud) this.cloud.visible = this.showCloud;
     };
 
-    this.anchor = new SurfaceAnchor(ctx.scene, ctx.mode.surface === 'floor' ? { x: 0.5, y: 0.85 } : { x: 0.5, y: 0.65 });
-    this.anchor.group.add(makeSurfaceGrid(1, 10));
+    const size = ctx.mode.surface === 'floor' ? 2 : 0.4;
+    this.anchor = new SurfaceAnchor(ctx.scene, size);
+    this.anchor.group.add(makeSurfaceGrid(size, 10));
+    // Ejes de la superficie (X rojo, Y verde = normal, Z azul = hacia la cámara).
+    const axes = new THREE.AxesHelper(size * 0.25);
+    axes.position.y = 0.002;
+    this.anchor.group.add(axes);
 
     const log = (s: string) => {
       this.logLines = [s, ...this.logLines].slice(0, 6);
@@ -86,7 +100,7 @@ class DebugApp implements AppInstance {
       const color = h.handedness === 'Left' ? '#ffb347' : '#7dff8a';
       o.skeleton(h.landmarks, HAND_CONNECTIONS, color, 3);
       for (const p of h.landmarks) o.circle(p, 3, '#fff');
-      o.text({ x: h.landmarks[0].x, y: h.landmarks[0].y + 0.05 }, `${h.handedness === 'Left' ? 'Izq' : 'Der'} · ${GESTURE_LABEL[h.gesture]}`, { color });
+      o.text({ x: h.landmarks[0].x, y: h.landmarks[0].y + 0.05 }, `${h.handedness === 'Left' ? 'Izq' : 'Der'}${SOURCE_LABEL[h.source]} · ${GESTURE_LABEL[h.gesture]}${h.palm3 ? ` · ${h.palm3.z.toFixed(2)} m` : ''}`, { color });
     }
 
     if (frame.face) {
@@ -122,7 +136,9 @@ class DebugApp implements AppInstance {
     g.putImageData(img, 0, 0);
 
     // Nube de puntos en la escena 3D (coordenadas de cámara → Three).
-    const pts = depthToPoints(depth, space.intrinsics, 3);
+    const k = space.intrinsics;
+    const kd = { ...k, fx: (k.fx * depth.width) / k.width, fy: (k.fy * depth.height) / k.height, cx: depth.width / 2, cy: depth.height / 2, width: depth.width, height: depth.height };
+    const pts = depthToPoints(depth, kd, 3);
     const positions = new Float32Array(pts.length * 3);
     const colors = new Float32Array(pts.length * 3);
     pts.forEach((p, i) => {
@@ -147,6 +163,8 @@ class DebugApp implements AppInstance {
     if (frame.body) {
       const m = frame.body.metrics;
       rows.push(`<h4>Cuerpo</h4>`);
+      const cam = frame.body.camera;
+      if (cam) rows.push(kv('Distancia', `${((cam[23].z + cam[24].z) / 2).toFixed(2)} m`));
       rows.push(kv('Visibilidad', `${Math.round(m.visibility * 100)}%`));
       rows.push(kv('Brazos arriba', `${m.leftArmUp ? 'izq ' : ''}${m.rightArmUp ? 'der' : ''}` || '—'));
       rows.push(kv('Inclinación', bar((m.lean + 1) / 2)));
@@ -158,7 +176,7 @@ class DebugApp implements AppInstance {
     if (frame.hands.length) {
       rows.push(`<h4>Manos</h4>`);
       for (const h of frame.hands) {
-        rows.push(kv(h.handedness === 'Left' ? 'Izquierda' : 'Derecha', `${GESTURE_LABEL[h.gesture]} · MP: ${h.mpGesture?.name ?? '—'} · v=${h.speed.toFixed(1)}`));
+        rows.push(kv(`${h.handedness === 'Left' ? 'Izquierda' : 'Derecha'}${SOURCE_LABEL[h.source]}`, `${GESTURE_LABEL[h.gesture]} · ${h.palm3 ? `${h.palm3.z.toFixed(2)} m` : '—'}`));
       }
     }
 
@@ -177,8 +195,10 @@ class DebugApp implements AppInstance {
 
     const s = frame.space;
     rows.push(`<h4>Espacio (${s.kind === 'floor' ? 'piso' : 'mesa'})</h4>`);
-    rows.push(kv('Profundidad', s.depthStatus));
-    rows.push(kv('Superficie', s.surfaceSource === 'depth' ? `detectada (${Math.round(s.surfaceConfidence * 100)}%)` : 'supuesta'));
+    const SRC = { marker: 'marcador', body: 'cuerpo', hand: 'mano apoyada', depth: 'profundidad IA', assumed: 'supuesta' } as const;
+    rows.push(kv('Fuente', SRC[s.surfaceSource]));
+    rows.push(kv('Profundidad IA', s.depthStatus));
+    rows.push(kv('Cámara sobre superficie', `${s.surface.d.toFixed(2)} m`));
     const n = s.surface.normal;
     rows.push(kv('Normal', `${n.x.toFixed(2)}, ${n.y.toFixed(2)}, ${n.z.toFixed(2)}`));
     if (s.up) rows.push(kv('Gravedad (celular)', `${s.up.x.toFixed(2)}, ${s.up.y.toFixed(2)}, ${s.up.z.toFixed(2)}`));
@@ -198,7 +218,9 @@ const bar = (v: number) => `<i class="bar"><i style="width:${Math.round(Math.max
 export const debugApp: AppDefinition = {
   id: 'debug',
   title: 'Visor de tracking',
-  icon: '🔬',
+  icon: 'microscope',
+  accent: '#f59e0b',
+  usesSurface: true,
   description: 'Muestra esqueleto, manos, cara, expresiones, gestos y la superficie detectada.',
   kind: 'utility',
   modes: ['fullbody', 'table'],

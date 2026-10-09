@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FruitSlicerGame } from '../src/apps/fruit-slicer/logic';
+import { bladeSweepHits, FruitSlicerGame } from '../src/apps/fruit-slicer/logic';
 import { WhackAMoleGame } from '../src/apps/whack-a-mole/logic';
 
 const bounds = { minX: 0, maxX: 16 / 9, minY: 0, maxY: 1 };
@@ -104,5 +104,26 @@ describe('WhackAMoleGame', () => {
     for (const i of outside) expect(g.moles[i].phase).toBe('up');
     expect(g.moles.filter((m) => m.phase === 'up' || m.phase === 'rising').length).toBe(outside.length);
     expect(g.triggerFreeze()).toBe(false);
+  });
+});
+
+describe('bladeSweepHits (katana)', () => {
+  it('detecta una fruta dentro del área barrida aunque esté lejos de la punta', () => {
+    const sweep = { prevBase: { x: 0, y: 1 }, prevTip: { x: 0, y: 0 }, base: { x: 0.5, y: 1 }, tip: { x: 0.5, y: 0 } };
+    expect(bladeSweepHits(sweep, { x: 0.25, y: 0.5 }, 0.01)).toBe(true);
+    expect(bladeSweepHits(sweep, { x: 0.8, y: 0.5 }, 0.05)).toBe(false);
+    expect(bladeSweepHits(sweep, { x: 0.53, y: 0.5 }, 0.05)).toBe(true);
+  });
+
+  it('una katana rápida corta en el juego', () => {
+    const g = new FruitSlicerGame(bounds, 7);
+    g.start();
+    const f = runUntilFruit(g, 'fruit');
+    const ev = g.update(1 / 60, {
+      blades: [],
+      head: null,
+      sweeps: [{ prevBase: { x: f.x - 0.3, y: f.y + 0.4 }, prevTip: { x: f.x - 0.3, y: f.y - 0.4 }, base: { x: f.x + 0.3, y: f.y + 0.4 }, tip: { x: f.x + 0.3, y: f.y - 0.4 }, speed: 4 }],
+    });
+    expect(ev.some((e) => e.type === 'slice')).toBe(true);
   });
 });

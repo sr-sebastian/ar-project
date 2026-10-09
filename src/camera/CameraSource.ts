@@ -47,8 +47,9 @@ export class DeviceCameraSource implements CameraSource {
       audio: false,
       video: {
         deviceId: this.deviceId ? { exact: this.deviceId } : undefined,
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        // 1080p: más píxeles para detectar manos y cara a 2–3 m (los crops los aprovechan).
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
         frameRate: { ideal: 30 },
       },
     });
